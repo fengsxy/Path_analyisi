@@ -84,9 +84,11 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# IDE
+# IDE / editor
 .idea/
 .vscode/
+.cursor/
+.claude/
 *.swp
 *.swo
 *~
