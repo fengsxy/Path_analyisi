@@ -133,6 +133,54 @@ def generate_batch_diagonal(model, scheduler, batch_size, num_steps, device, eta
 
 
 @torch.no_grad()
+def generate_batch_random32(model, scheduler, batch_size, num_steps, device, eta=0.0):
+    """Generate with random 32×32 (Experiment 4a: test if 32×32 contributes)."""
+    scheduler._set_timesteps(num_steps)
+    timesteps = scheduler.timesteps
+
+    x_64 = torch.randn(batch_size, 3, 64, 64, device=device)
+
+    for i, t in enumerate(timesteps):
+        t_tensor = torch.tensor([t], device=device).expand(batch_size)
+
+        # Keep 32×32 as random noise at each step
+        x_32_random = torch.randn(batch_size, 3, 32, 32, device=device)
+
+        # Same timestep for both scales (diagonal path)
+        noise_pred_64, noise_pred_32 = model(x_64, x_32_random, t_tensor, t_tensor)
+
+        prev_t = timesteps[i + 1] if i < len(timesteps) - 1 else 0
+        x_64 = ddim_step(scheduler, noise_pred_64, t, prev_t, x_64, eta)
+        # x_32 is not updated, stays random
+
+    x_64 = (x_64 + 1) * 0.5
+    return x_64
+
+
+@torch.no_grad()
+def generate_batch_fixed32(model, scheduler, batch_size, num_steps, device, eta=0.0):
+    """Generate with fixed 32×32 (Experiment 4b: test if 32×32 contributes)."""
+    scheduler._set_timesteps(num_steps)
+    timesteps = scheduler.timesteps
+
+    x_64 = torch.randn(batch_size, 3, 64, 64, device=device)
+    x_32_fixed = torch.randn(batch_size, 3, 32, 32, device=device)  # Fixed noise
+
+    for i, t in enumerate(timesteps):
+        t_tensor = torch.tensor([t], device=device).expand(batch_size)
+
+        # Use the same fixed 32×32 noise at each step
+        noise_pred_64, noise_pred_32 = model(x_64, x_32_fixed, t_tensor, t_tensor)
+
+        prev_t = timesteps[i + 1] if i < len(timesteps) - 1 else 0
+        x_64 = ddim_step(scheduler, noise_pred_64, t, prev_t, x_64, eta)
+        # x_32_fixed is not updated
+
+    x_64 = (x_64 + 1) * 0.5
+    return x_64
+
+
+@torch.no_grad()
 def generate_batch_dp(model, scheduler, batch_size, num_steps, device,
                       gamma_grid, optimal_gamma1, eta=0.0):
     """Generate with DP optimal path."""
@@ -191,8 +239,9 @@ def parse_args():
     parser.add_argument('--num_images', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_steps', type=int, default=50)
-    parser.add_argument('--mode', type=str, choices=['diagonal', 'dp', 'dp_64'], required=True,
-                        help='diagonal: γ₁=γ₀, dp: optimize total error, dp_64: optimize 64×64 error only')
+    parser.add_argument('--mode', type=str, choices=['diagonal', 'dp', 'dp_64', 'random32', 'fixed32'], required=True,
+                        help='diagonal: γ₁=γ₀, dp: optimize total error, dp_64: optimize 64×64 error only, '
+                             'random32: 32×32 stays random noise, fixed32: 32×32 fixed noise')
     parser.add_argument('--heatmap', type=str, default=None, help='Required for dp mode')
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--eta', type=float, default=0.0)
@@ -267,6 +316,14 @@ def main():
 
         if args.mode == 'diagonal':
             images = generate_batch_diagonal(
+                model, scheduler, current_batch_size, args.num_steps, device, args.eta
+            )
+        elif args.mode == 'random32':
+            images = generate_batch_random32(
+                model, scheduler, current_batch_size, args.num_steps, device, args.eta
+            )
+        elif args.mode == 'fixed32':
+            images = generate_batch_fixed32(
                 model, scheduler, current_batch_size, args.num_steps, device, args.eta
             )
         else:  # dp or dp_64

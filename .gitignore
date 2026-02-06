@@ -97,10 +97,10 @@ Thumbs.db
 
 # Project specific
 checkpoints/
-results/*.png
-results/*.pth
-results/fid_*/
-results/test_*.txt
+# All generated results (images, metrics, checkpoints under results/)
+results/
+# Large evaluation output (10k+ images, ~121MB)
+results_10k/
 logs/
 *.log
 

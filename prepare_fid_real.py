@@ -43,7 +43,7 @@ def main():
     # Save images
     print(f"Saving {num_images} images to {args.output_dir}...")
     for i, idx in enumerate(tqdm(indices, desc="Saving")):
-        img_tensor = dataset[idx]
+        img_tensor = dataset[int(idx)]  # Convert numpy.int64 to Python int
         # Convert from [-1, 1] to [0, 255]
         img_np = ((img_tensor.numpy().transpose(1, 2, 0) + 1) * 127.5).astype(np.uint8)
         img_pil = Image.fromarray(img_np)

@@ -39,6 +39,8 @@ def parse_args():
     parser.add_argument('--fp16', action='store_true', help='Use mixed precision')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--device', type=int, default=0, help='GPU device ID')
+    parser.add_argument('--save_every', type=int, default=None,
+                        help='Save checkpoint every N epochs (default: None, only save final)')
     return parser.parse_args()
 
 
@@ -171,6 +173,18 @@ def main():
         lr_scheduler.step()
 
         print(f"Epoch {epoch+1}/{args.epochs} - Loss: {epoch_loss:.4f}")
+
+        # Save intermediate checkpoint if save_every is specified
+        if args.save_every is not None and (epoch + 1) % args.save_every == 0:
+            checkpoint_path = os.path.join(args.output_dir, f'baseline_{epoch+1}ep.pth')
+            torch.save({
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'hidden_dims': hidden_dims,
+                'losses': losses,
+                'epochs': epoch + 1
+            }, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
 
     # Save final model
     save_path = os.path.join(args.output_dir, 'baseline_final.pth')
