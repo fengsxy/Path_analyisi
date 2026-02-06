@@ -386,9 +386,6 @@ python tests/test.py \
 
 **Note**: While LIFT's best performance was at 80 epochs (DP-64: 57.46 FID), these 100 epoch samples show the model after slight overfitting.
 
-**Full Comparison:**
-![All Models](figure_plot/comparison_all.png)
-
 ## File Structure
 
 ```
