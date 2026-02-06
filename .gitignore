@@ -98,6 +98,7 @@ Thumbs.db
 # Project specific
 checkpoints/
 # All generated results (images, metrics, checkpoints under results/)
+# (includes explore_test/results/ and explore_test/checkpoints/)
 results/
 # Large evaluation output (10k+ images, ~121MB)
 results_10k/
