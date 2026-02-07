@@ -97,24 +97,29 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# Project specific
+# Project specific — avoid pushing large files to GitHub
 checkpoints/
-# All generated results (images, metrics, checkpoints under results/)
-# (includes explore_test/results/ and explore_test/checkpoints/)
 results/
-# Large evaluation output (10k+ images, ~121MB)
 results_10k/
 logs/
 *.log
 
-# Large files
+# Model weights and checkpoints (can be very large)
 *.pt
 *.pth
 *.ckpt
+*.safetensors
 
-# HuggingFace cache
+# Dataset / cache (HuggingFace, local data)
 .cache/
+data/
+datasets/
 
-# Temporary files
+# FID eval image dirs (generated, large)
+fid_real/
+fid_*/
+
+# Experiment / debug
+wandb/
 tmp/
 temp/
