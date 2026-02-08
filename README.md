@@ -146,25 +146,15 @@ While cross-Jacobians are small in absolute terms, the trend is unambiguous: **t
 
 ## Visualizations
 
-### Optimal Path Visualization (2000 epochs)
-
-The heatmaps show discretization error across the 2D timestep space (t_64 × t_32). The optimal 18-step path (yellow points connected by red line) is computed via dynamic programming to minimize total error.
+### Optimal Path Visualization (EMA 400 epochs)
 
 | 64×64 Error Heatmap | Total Error Heatmap |
 |:-------------------:|:-------------------:|
-| ![DP-64 Path](results/heatmap_30_2000ep_64.png) | ![DP-Total Path](results/heatmap_30_2000ep_total.png) |
-
-- **Cyan line**: Diagonal path (t_64 = t_32)
-- **Yellow points + Red line**: Optimal 18-step DP path
-- **DP-Total path** deviates from diagonal to minimize combined error
+| ![DP-64 Path](results/heatmap_30_ema_400ep_64.png) | ![DP-Total Path](results/heatmap_30_ema_400ep_total.png) |
 
 ### Path Convergence Across Epochs
 
 ![Path Comparison](results/path_comparison_across_epochs.png)
-
-- **DP-Total paths converge after 1200ep** (green/blue/purple lines overlap)
-- **DP-64 paths converge after 1200ep** with L-shaped trajectory
-- Early epochs (400, 800) show different paths due to undertrained model
 
 ### EMA Path Convergence Across Epochs
 
