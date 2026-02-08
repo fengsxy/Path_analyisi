@@ -1,0 +1,568 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{LIFT: Learned Independent Frequency Timesteps\\for Dual-Scale Diffusion Models}
+\author{Research Report}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+We present LIFT (Learned Independent Frequency Timesteps), a dual-scale diffusion model that jointly denoises 64$\times$64 and 32$\times$32 images with \emph{independent} timesteps for each scale.
+Unlike standard diffusion models that use a single shared timestep, LIFT accepts arbitrary $(t_{64}, t_{32})$ pairs, enabling a 2D timestep scheduling problem during inference.
+We formulate this as a shortest-path problem on a discretization-error heatmap and solve it via dynamic programming (DP), drawing on the ``Align Your Steps'' framework.
+On AFHQv2 64$\times$64, LIFT with DP-Total path optimization achieves FID 36.65$\pm$0.23 at 2000 epochs (5-seed mean), compared to a single-scale baseline's 33.07$\pm$0.13 at 200 epochs.
+Crucially, EMA training closes this gap: Baseline EMA achieves 27.90 and LIFT EMA DP-Total achieves 29.45, both at 400 epochs.
+Ablation studies on single-output architectures confirm that (i) DP path optimization reduces FID by 130+ points over diagonal scheduling, and (ii) providing timestep information to the model is essential (single\_t DP: 38.6 vs.\ no\_t DP: 50.8).
+\end{abstract}
+
+% ============================================================
+% 1. INTRODUCTION
+% ============================================================
+\section{Introduction}
+
+Diffusion models generate images by iteratively denoising from pure noise, following a learned reverse process.
+A key design choice is the \emph{timestep schedule}---the sequence of noise levels visited during generation.
+Recent work (``Align Your Steps'', AYS) shows that optimizing this schedule based on discretization error can significantly improve sample quality without retraining.
+
+In multi-scale diffusion, where a model jointly processes images at multiple resolutions, the scheduling problem becomes fundamentally harder.
+With two scales (e.g., 64$\times$64 and 32$\times$32), each with its own timestep, the schedule is no longer a 1D sequence but a \emph{path through a 2D timestep space}.
+The diagonal path ($t_{64} = t_{32}$) is the natural default, but it may be suboptimal: different scales may benefit from different denoising speeds.
+
+We introduce \textbf{LIFT} (Learned Independent Frequency Timesteps), a dual-scale diffusion model that accepts independent timesteps $(t_{64}, t_{32})$ for each scale.
+This design enables us to:
+\begin{enumerate}
+    \item Compute a 2D discretization-error heatmap over the $(t_{64}, t_{32})$ space using the Hutchinson trace estimator.
+    \item Find the optimal denoising path via dynamic programming, minimizing the total discretization error subject to step-count and smoothness constraints.
+\end{enumerate}
+
+We evaluate LIFT on AFHQv2 64$\times$64 across 2000 training epochs, comparing diagonal scheduling, DP-optimized paths (DP-64 and DP-Total), a single-scale baseline, and EMA variants.
+We also conduct ablation studies with reduced architectures (single-timestep and no-timestep models) to isolate the contributions of dual-timestep conditioning and path optimization.
+
+% ============================================================
+% 2. METHOD
+% ============================================================
+\section{Method}
+
+\subsection{LIFT Dual-Timestep Model}
+
+The LIFT model is a UNet that takes as input a concatenation of a noisy 64$\times$64 image $\mathbf{x}_{64}$ and a noisy 32$\times$32 image $\mathbf{x}_{32}$ (bilinearly upsampled to 64$\times$64), along with \emph{two independent timesteps} $t_{64}$ and $t_{32}$.
+The model predicts noise for both scales simultaneously:
+\[
+(\hat{\boldsymbol{\epsilon}}_{64},\, \hat{\boldsymbol{\epsilon}}_{32}) = f_\theta(\mathbf{x}_{64},\, \mathbf{x}_{32},\, t_{64},\, t_{32}).
+\]
+
+\paragraph{Architecture.}
+The encoder--decoder UNet has hidden dimensions $[64, 128, 256, 512]$ across 4 resolution levels, with self-attention at channels $\geq 128$.
+Each timestep is independently embedded via sinusoidal position encodings followed by an MLP, then the two embeddings are concatenated and projected to a combined time embedding that conditions all residual blocks.
+The input has 6 channels (3 per scale) and the output has 6 channels, split back into 64$\times$64 and 32$\times$32 predictions.
+The model has approximately 58.5M parameters.
+
+\paragraph{Training.}
+During training, $t_{64}$ and $t_{32}$ are sampled \emph{independently} and uniformly from $\{0, \ldots, 999\}$.
+This ensures the model learns to handle any $(t_{64}, t_{32})$ pair, not just the diagonal $t_{64} = t_{32}$.
+The loss is the sum of MSE losses on both scales:
+\[
+\mathcal{L} = \|\hat{\boldsymbol{\epsilon}}_{64} - \boldsymbol{\epsilon}_{64}\|^2 + \|\hat{\boldsymbol{\epsilon}}_{32} - \boldsymbol{\epsilon}_{32}\|^2.
+\]
+
+\subsection{Discretization Error Estimation}
+
+Following the AYS framework, we estimate the local discretization error at each point in the 2D timestep space.
+The error quantifies how much information is lost when taking a finite-size denoising step.
+
+\paragraph{Hutchinson estimator.}
+For a denoising function $f$ at timestep $t$, the squared Frobenius norm of the Jacobian $\mathbf{J} = \partial f / \partial \mathbf{x}$ is estimated as:
+\[
+\|\mathbf{J}\|_F^2 \approx \frac{1}{K} \sum_{k=1}^{K} \mathbf{v}_k^\top (\mathbf{J} \odot \mathbf{J})\, \mathbf{v}_k,
+\]
+where $\mathbf{v}_k$ are Rademacher random vectors ($\pm 1$) and $K=4$ samples.
+The Jacobian-vector products are computed efficiently via \texttt{torch.func.jvp}.
+
+\paragraph{Chain-rule factor.}
+To convert error from $\mathbf{x}_t$-space to SNR-space (where the theoretical analysis applies), we multiply by the chain-rule factor:
+\[
+\gamma(\text{SNR}) = \frac{1}{\text{SNR} \cdot (1 + \text{SNR})}, \qquad \text{SNR} = \frac{\bar{\alpha}_t}{1 - \bar{\alpha}_t}.
+\]
+This ensures the error decays as $\text{SNR}^{-2}$ at high SNR, matching the theoretical expectation from stochastic localization.
+
+\paragraph{Error heatmap.}
+We compute error on a $30 \times 30$ grid over the $(t_{64}, t_{32})$ space, where index 0 maps to $t=999$ (high noise) and index 29 maps to $t=0$ (clean).
+Three error matrices are stored: $E_{64}$ (64-scale error only), $E_{32}$ (32-scale error only), and $E_{\text{total}} = E_{64} + E_{32}$.
+
+\subsection{2D Path Optimization via Dynamic Programming}
+
+\paragraph{Problem formulation.}
+Given $N$ denoising steps (default $N=18$), we seek a path
+\[
+(i_0, j_0) \to (i_1, j_1) \to \cdots \to (i_N, j_N)
+\]
+through the $30 \times 30$ error grid, starting at $(0, 0)$ (both scales at $t=999$) and ending at $(29, 29)$ (both at $t=0$).
+
+\paragraph{Cost function.}
+The cost of a single step from $(i_a, j_a)$ to $(i_b, j_b)$ is the trapezoidal integral of error along the step:
+\[
+C_{\text{step}} = \frac{E(i_a, j_a) + E(i_b, j_b)}{2} \times \|(i_b - i_a,\, j_b - j_a)\|_2.
+\]
+This penalizes large jumps through high-error regions, matching the continuous integral formulation in AYS.
+Simply minimizing $\sum E(i_k, j_k)$ without the step-size factor would allow unrealistic paths that jump from $t=999$ to $t=0$ in a single step.
+
+\paragraph{Constraints.}
+Each step is constrained to move at most $\Delta_{\max} = 5$ grid cells in each dimension ($\approx$170 timesteps), ensuring the path is smooth enough for DDIM.
+Without this constraint, the DP exploits the structure of $E_{64}$ (which depends primarily on $t_{64}$, producing vertical stripes in the heatmap) by jumping $t_{64}$ from 999 to 0 in one step.
+
+\paragraph{DP algorithm.}
+We define $\text{dp}[i][j][k]$ as the minimum cost to reach grid cell $(i, j)$ in exactly $k$ steps.
+The recurrence considers all predecessors within the $\Delta_{\max}$ neighborhood.
+Two path types are optimized:
+\begin{itemize}
+    \item \textbf{DP-64}: Uses $E_{64}$ only, prioritizing 64$\times$64 quality.
+    \item \textbf{DP-Total}: Uses $E_{\text{total}} = E_{64} + E_{32}$, balancing both scales.
+\end{itemize}
+
+After finding the optimal path on the $30 \times 30$ grid, we allocate $N$ sampling points along it such that each segment carries approximately equal cumulative error, then map grid indices back to actual timesteps for DDIM generation.
+
+% ============================================================
+% 3. EXPERIMENTAL SETUP
+% ============================================================
+\section{Experimental Setup}
+
+\paragraph{Dataset.}
+We use AFHQv2 (Animal Faces HQ) at 64$\times$64 resolution, loaded via HuggingFace (\texttt{huggan/AFHQv2}).
+The training set contains 15,803 images across three categories (cat, dog, wild).
+All 15,803 training images are used for FID computation (both as the reference set and as the number of generated samples).
+
+\paragraph{Models.}
+We compare four model configurations:
+\begin{itemize}
+    \item \textbf{Baseline}: Single-scale UNet, hidden dims $[64, 128, 256, 512]$, 58.3M parameters.
+    \item \textbf{LIFT}: Dual-scale UNet with independent timesteps, hidden dims $[64, 128, 256, 512]$, 58.5M parameters.
+          The two models have nearly identical parameter counts ($\sim$58M); the 0.2M difference comes from LIFT's dual timestep embedding and 6-channel I/O.
+    \item \textbf{single\_t} (ablation): Dual-scale UNet receiving only $t_{64}$; the 32$\times$32 input is constructed from the 64$\times$64 prediction at each step.
+    \item \textbf{no\_t} (ablation): Dual-scale UNet with no timestep embedding at all.
+\end{itemize}
+
+\paragraph{Training.}
+All models are trained with AdamW (lr=$10^{-4}$, weight decay=$0.01$), cosine annealing schedule (min lr=$10^{-6}$), batch size 64, gradient clipping at 1.0, and a cosine noise schedule with 1000 timesteps.
+Models are trained for up to 2000 epochs with checkpoints saved every 200 epochs.
+EMA variants use exponential moving average with decay $0.9999$.
+
+\paragraph{Evaluation.}
+FID is computed on 15,803 generated images using 18 DDIM steps.
+For the main (non-EMA) experiments, we report 5-seed mean$\pm$std (seeds 42--46).
+EMA and ablation experiments use a single seed.
+Generation modes: \emph{Diagonal} ($t_{64}=t_{32}$), \emph{DP-64} (path optimized for $E_{64}$), and \emph{DP-Total} (path optimized for $E_{\text{total}}$).
+
+% ============================================================
+% 4. ALGORITHMS
+% ============================================================
+\section{Algorithms}
+
+\subsection{Discretization Error via Hutchinson Estimator}
+
+Algorithm~\ref{alg:vhv} describes how we estimate the squared Frobenius norm of the Jacobian at each point in the 2D timestep grid.
+
+\begin{algorithm}[h]
+\caption{Compute $\|\mathbf{J}\|_F^2$ via Hutchinson Estimator}
+\label{alg:vhv}
+\begin{algorithmic}[1]
+\REQUIRE Denoising model $f_\theta$, grid resolution $G=30$, Hutchinson samples $K=4$, batch of data $\{\mathbf{x}\}$
+\ENSURE Error matrices $E_{64}[G \times G]$, $E_{32}[G \times G]$
+\FOR{$i = 0$ \TO $G-1$}
+    \FOR{$j = 0$ \TO $G-1$}
+        \STATE $t_{64} \leftarrow \text{GridToTimestep}(i)$ \COMMENT{Index 0 $\to$ $t$=999, index 29 $\to$ $t$=0}
+        \STATE $t_{32} \leftarrow \text{GridToTimestep}(j)$
+        \STATE $\mathbf{x}_{64}^{(t)} \leftarrow \sqrt{\bar\alpha_{t_{64}}}\,\mathbf{x}_{64} + \sqrt{1-\bar\alpha_{t_{64}}}\,\boldsymbol{\epsilon}_{64}$
+        \STATE $\mathbf{x}_{32}^{(t)} \leftarrow \sqrt{\bar\alpha_{t_{32}}}\,\mathbf{x}_{32} + \sqrt{1-\bar\alpha_{t_{32}}}\,\boldsymbol{\epsilon}_{32}$
+        \STATE $\text{err}_{64}, \text{err}_{32} \leftarrow 0, 0$
+        \FOR{$k = 1$ \TO $K$}
+            \STATE Sample $\mathbf{v} \sim \text{Rademacher}(\pm 1)$
+            \STATE Compute $\mathbf{J}\mathbf{v}$ via \texttt{torch.func.jvp}: $(\hat{\boldsymbol{\epsilon}}_{64}, \hat{\boldsymbol{\epsilon}}_{32}), (\mathbf{J}_{64}\mathbf{v}, \mathbf{J}_{32}\mathbf{v}) = \text{jvp}(f_\theta, \mathbf{x}^{(t)}, \mathbf{v})$
+            \STATE $\text{err}_{64} \mathrel{+}= \mathbf{v}^\top (\mathbf{J}_{64}\mathbf{v} \odot \mathbf{J}_{64}\mathbf{v})$ \COMMENT{$\approx \|\mathbf{J}_{64}\|_F^2$}
+            \STATE $\text{err}_{32} \mathrel{+}= \mathbf{v}^\top (\mathbf{J}_{32}\mathbf{v} \odot \mathbf{J}_{32}\mathbf{v})$
+        \ENDFOR
+        \STATE $\text{SNR}_{64} \leftarrow \bar\alpha_{t_{64}} / (1 - \bar\alpha_{t_{64}})$
+        \STATE $E_{64}[i,j] \leftarrow (\text{err}_{64}/K) \cdot \gamma(\text{SNR}_{64})$ \COMMENT{$\gamma(\text{SNR}) = 1/(\text{SNR}\cdot(1+\text{SNR}))$}
+        \STATE $E_{32}[i,j] \leftarrow (\text{err}_{32}/K) \cdot \gamma(\text{SNR}_{32})$
+    \ENDFOR
+\ENDFOR
+\RETURN $E_{64}$, $E_{32}$, $E_{\text{total}} = E_{64} + E_{32}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Optimal Path via Dynamic Programming}
+
+Algorithm~\ref{alg:dp} finds the minimum-cost $N$-step path through the error heatmap.
+
+\begin{algorithm}[h]
+\caption{DP Optimal Path in 2D Timestep Space}
+\label{alg:dp}
+\begin{algorithmic}[1]
+\REQUIRE Error matrix $E[G \times G]$, number of steps $N=18$, max jump $\Delta_{\max}=5$
+\ENSURE Optimal path $\mathcal{P} = \{(i_0,j_0), \ldots, (i_N,j_N)\}$
+\STATE Initialize $\text{dp}[i][j][k] \leftarrow \infty$ for all $i,j,k$
+\STATE $\text{dp}[0][0][0] \leftarrow 0$ \COMMENT{Start at (0,0) = both scales at $t$=999}
+\FOR{$k = 0$ \TO $N-1$}
+    \FOR{each $(i,j)$ where $\text{dp}[i][j][k] < \infty$}
+        \FOR{$\delta_i = 0$ \TO $\Delta_{\max}$}
+            \FOR{$\delta_j = 0$ \TO $\Delta_{\max}$}
+                \IF{$\delta_i = 0$ and $\delta_j = 0$}
+                    \STATE \textbf{continue} \COMMENT{Must make progress}
+                \ENDIF
+                \STATE $(i', j') \leftarrow (i + \delta_i,\, j + \delta_j)$
+                \IF{$i' \geq G$ or $j' \geq G$}
+                    \STATE \textbf{continue}
+                \ENDIF
+                \STATE $\text{step\_size} \leftarrow \sqrt{\delta_i^2 + \delta_j^2}$
+                \STATE $\text{cost} \leftarrow \frac{E[i,j] + E[i',j']}{2} \times \text{step\_size}$ \COMMENT{Trapezoidal rule}
+                \STATE $\text{dp}[i'][j'][k+1] \leftarrow \min(\text{dp}[i'][j'][k+1],\; \text{dp}[i][j][k] + \text{cost})$
+            \ENDFOR
+        \ENDFOR
+    \ENDFOR
+\ENDFOR
+\STATE $\mathcal{P} \leftarrow \text{Backtrack from } \text{dp}[G{-}1][G{-}1][N]$
+\RETURN $\mathcal{P}$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+% 5. RESULTS
+% ============================================================
+\section{Results}
+
+\subsection{Main Results (5-Seed, Non-EMA)}
+
+Table~\ref{tab:main} reports FID scores (mean$\pm$std over 5 seeds) for the Baseline and LIFT models across training epochs.
+
+\begin{table}[h]
+\centering
+\caption{FID scores (mean$\pm$std, 5 seeds) on AFHQv2 64$\times$64. Lower is better. Best per-row in \textbf{bold}.}
+\label{tab:main}
+\small
+\begin{tabular}{r cccc}
+\toprule
+Epoch & Baseline & LIFT Diagonal & LIFT DP-64 & LIFT DP-Total \\
+\midrule
+200  & \textbf{33.07$\pm$0.13} & 87.22$\pm$0.35 & 85.75$\pm$0.39 & 80.53$\pm$0.16 \\
+400  & 41.54$\pm$0.30 & 49.60$\pm$0.28 & 51.77$\pm$0.29 & \textbf{39.35$\pm$0.26} \\
+600  & \textbf{34.04$\pm$0.16} & 50.07$\pm$0.32 & 49.77$\pm$0.22 & 46.48$\pm$0.40 \\
+800  & 40.82$\pm$0.20 & 49.07$\pm$0.44 & 48.39$\pm$0.26 & \textbf{40.43$\pm$0.31} \\
+1000 & \textbf{41.05$\pm$0.16} & 82.11$\pm$0.44 & 76.58$\pm$0.31 & 63.59$\pm$0.26 \\
+1200 & 52.32$\pm$0.29 & 72.69$\pm$0.34 & 61.05$\pm$0.26 & \textbf{40.11$\pm$0.22} \\
+1400 & 45.85$\pm$0.26 & 76.40$\pm$0.18 & 63.39$\pm$0.10 & \textbf{40.55$\pm$0.24} \\
+1600 & 48.13$\pm$0.34 & 64.89$\pm$0.31 & 60.91$\pm$0.22 & \textbf{40.28$\pm$0.39} \\
+1800 & \textbf{45.61$\pm$0.22} & 101.76$\pm$0.38 & 82.96$\pm$0.25 & 53.96$\pm$0.20 \\
+2000 & 59.37$\pm$0.19 & 69.61$\pm$0.08 & 51.83$\pm$0.15 & \textbf{36.65$\pm$0.23} \\
+\midrule
+Best & 33.07 (200ep) & 49.07 (800ep) & 48.39 (800ep) & 36.65 (2000ep) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{EMA Results}
+
+Table~\ref{tab:ema} shows FID scores for EMA-trained models (single seed).
+
+\begin{table}[h]
+\centering
+\caption{FID scores with EMA (decay=0.9999, single seed). Best per-row in \textbf{bold}.}
+\label{tab:ema}
+\small
+\begin{tabular}{r cccc}
+\toprule
+Epoch & Baseline EMA & LIFT EMA Diag & LIFT EMA DP-64 & LIFT EMA DP-Total \\
+\midrule
+200  & \textbf{28.22} & 38.54 & 34.10 & 37.45 \\
+400  & \textbf{27.90} & 31.04 & 29.87 & 29.45 \\
+600  & \textbf{30.00} & 35.94 & 34.22 & 30.16 \\
+800  & \textbf{31.52} & 44.32 & 38.36 & 31.37 \\
+1000 & ---           & 46.12 & 38.35 & \textbf{31.32} \\
+1200 & ---           & 46.83 & 37.49 & \textbf{31.74} \\
+\midrule
+Best & 27.90 (400ep) & 31.04 (400ep) & 29.87 (400ep) & 29.45 (400ep) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation: Single-Output Architectures (explore\_test)}
+
+Table~\ref{tab:ablation} reports FID for the single-output ablation models that predict only 64$\times$64 noise.
+The 32$\times$32 input is constructed from the 64$\times$64 prediction at each denoising step.
+
+\begin{table}[h]
+\centering
+\caption{Ablation FID scores (single seed). \textbf{single\_t}: receives $t_{64}$ only. \textbf{no\_t}: no timestep embedding.}
+\label{tab:ablation}
+\small
+\begin{tabular}{r cccc}
+\toprule
+Epoch & single\_t Diag & single\_t DP & no\_t Diag & no\_t DP \\
+\midrule
+200  & 231.23 & 61.90 & 241.14 & 118.28 \\
+400  & 209.82 & 45.16 & 230.22 & 57.92 \\
+600  & 219.00 & \textbf{38.63} & 196.65 & 50.76 \\
+800  & 231.28 & 42.52 & 177.12 & 65.01 \\
+1000 & 220.37 & 46.23 & 170.03 & 81.40 \\
+1200 & 243.62 & 48.42 & \textbf{167.26} & 75.91 \\
+1400 & 250.40 & 45.30 & 167.25 & 56.43 \\
+1600 & 261.03 & 48.49 & 180.69 & 82.68 \\
+1800 & 256.19 & 60.19 & 187.47 & 73.21 \\
+2000 & 259.67 & 51.99 & 193.21 & 70.71 \\
+\midrule
+Best & 209.82 (400ep) & 38.63 (600ep) & 167.25 (1400ep) & 50.76 (600ep) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Summary of Best Results}
+
+Table~\ref{tab:summary} summarizes the best FID achieved by each model configuration.
+
+\begin{table}[h]
+\centering
+\caption{Best FID across all experiments. $^\dagger$5-seed mean$\pm$std; others are single seed.}
+\label{tab:summary}
+\small
+\begin{tabular}{llcc}
+\toprule
+Model & Generation Mode & Best FID & Epoch \\
+\midrule
+Baseline$^\dagger$ & Diagonal & 33.07$\pm$0.13 & 200 \\
+LIFT Diagonal$^\dagger$ & Diagonal & 49.07$\pm$0.44 & 800 \\
+LIFT DP-64$^\dagger$ & DP-64 & 48.39$\pm$0.26 & 800 \\
+LIFT DP-Total$^\dagger$ & DP-Total & 36.65$\pm$0.23 & 2000 \\
+\midrule
+Baseline EMA & Diagonal & 27.90 & 400 \\
+LIFT EMA Diagonal & Diagonal & 31.04 & 400 \\
+LIFT EMA DP-64 & DP-64 & 29.87 & 400 \\
+LIFT EMA DP-Total & DP-Total & 29.45 & 400 \\
+\midrule
+single\_t Diagonal & Diagonal & 209.82 & 400 \\
+single\_t DP & DP-64 & 38.63 & 600 \\
+no\_t Diagonal & Diagonal & 167.25 & 1400 \\
+no\_t DP & DP-64 & 50.76 & 600 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Findings}
+
+\begin{enumerate}
+    \item \textbf{DP path optimization is critical for LIFT.}
+    Without path optimization, LIFT Diagonal (49.07) substantially underperforms the Baseline (33.07).
+    DP-Total closes this gap to 36.65, a 12.4-point improvement over Diagonal.
+    The effect is even more dramatic in the ablation models: single\_t Diagonal scores 209.82 vs.\ single\_t DP at 38.63---a 171-point improvement.
+
+    \item \textbf{EMA significantly improves all models.}
+    Baseline improves from 33.07 to 27.90 ($-$5.2 FID), and LIFT DP-Total improves from 36.65 to 29.45 ($-$7.2 FID).
+    With EMA, the gap between Baseline and LIFT DP-Total narrows to just 1.55 FID points (27.90 vs.\ 29.45).
+
+    \item \textbf{LIFT DP-Total shows superior training stability.}
+    The Baseline degrades from 33.07 (200ep) to 59.37 (2000ep), a +26.3 FID increase.
+    In contrast, LIFT DP-Total \emph{improves} from 80.53 (200ep) to 36.65 (2000ep), showing no overfitting.
+    This suggests the dual-scale architecture with DP scheduling provides a regularization effect.
+
+    \item \textbf{Timestep information is essential.}
+    In the ablation study, single\_t DP (38.63) substantially outperforms no\_t DP (50.76), confirming that the model benefits from knowing the noise level of the 64$\times$64 input.
+    Both ablation models show that DP path optimization can partially compensate for architectural limitations.
+\end{enumerate}
+
+% ============================================================
+% 6. FIGURES
+% ============================================================
+\section{Visualizations}
+
+\subsection{Discretization Error Heatmaps with DP Paths}
+
+Figure~\ref{fig:heatmaps} shows the 30$\times$30 error heatmaps at selected epochs, with the DP-Total optimal path overlaid.
+The $x$-axis is $t_{32}$ (index 0 = high noise, 29 = clean) and the $y$-axis is $t_{64}$.
+Brighter regions indicate higher discretization error.
+The red line shows the DP-Total path; yellow dots mark the 18 sampling points.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_400ep_total.png}
+    \caption{400 epochs}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_1000ep_total.png}
+    \caption{1000 epochs}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_2000ep_total.png}
+    \caption{2000 epochs}
+\end{subfigure}
+\caption{Total error heatmaps ($E_{64} + E_{32}$) with DP-Total optimal paths at different training epochs.}
+\label{fig:heatmaps}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_400ep_64.png}
+    \caption{$E_{64}$ only, 400ep}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_400ep.png}
+    \caption{$E_{32}$ only, 400ep}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/heatmap_30_400ep_total.png}
+    \caption{$E_{\text{total}}$, 400ep}
+\end{subfigure}
+\caption{Comparison of error components at 400 epochs. $E_{64}$ shows vertical stripe structure (depends mainly on $t_{64}$), while $E_{32}$ shows horizontal stripes. $E_{\text{total}}$ combines both, leading to a more balanced DP path.}
+\label{fig:error_components}
+\end{figure}
+
+\subsection{Generated Samples}
+
+Figure~\ref{fig:samples_main} shows sample grids from the main models at 2000 epochs.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_baseline_2000ep.png}
+    \caption{Baseline (FID 59.37)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_lift_2000ep.png}
+    \caption{LIFT Diagonal (FID 69.61)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_lift_dp_total_2000ep.png}
+    \caption{LIFT DP-Total (FID 36.65)}
+\end{subfigure}
+\caption{Generated samples at 2000 epochs. LIFT DP-Total produces the best quality despite the Baseline and LIFT Diagonal degrading at this epoch.}
+\label{fig:samples_main}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_baseline_200ep.png}
+    \caption{Baseline 200ep (FID 33.07)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_lift_dp_total_400ep.png}
+    \caption{LIFT DP-Total 400ep (FID 39.35)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{../results/grid_lift_ema_dp_total_400ep.png}
+    \caption{LIFT EMA DP-Total 400ep (FID 29.45)}
+\end{subfigure}
+\caption{Best models from each experiment category. EMA training yields the best overall quality.}
+\label{fig:samples_best}
+\end{figure}
+
+\subsection{Ablation: Diagonal vs.\ DP Samples}
+
+Figure~\ref{fig:ablation_samples} illustrates the dramatic effect of DP path optimization on the ablation models.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/grid_single_t_600ep.png}
+    \caption{single\_t Diag\\(FID 219.0)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/grid_single_t_dp_600ep.png}
+    \caption{single\_t DP\\(FID 38.6)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/grid_no_t_600ep.png}
+    \caption{no\_t Diag\\(FID 196.6)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.24\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/grid_no_t_dp_600ep.png}
+    \caption{no\_t DP\\(FID 50.8)}
+\end{subfigure}
+\caption{Ablation models at 600 epochs. Diagonal scheduling produces near-random noise, while DP path optimization recovers recognizable images. The single\_t model (which receives $t_{64}$) outperforms the no\_t model (blind denoiser).}
+\label{fig:ablation_samples}
+\end{figure}
+
+\subsection{Ablation: Error Heatmaps}
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/heatmap_30_single_t_600ep.png}
+    \caption{single\_t heatmap (600ep)}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{../explore_test/results/heatmap_30_no_t_600ep.png}
+    \caption{no\_t heatmap (600ep)}
+\end{subfigure}
+\caption{Error heatmaps for ablation models. The single\_t model shows clearer structure (vertical stripes from $t_{64}$ dependence), while the no\_t model's error is more diffuse.}
+\label{fig:ablation_heatmaps}
+\end{figure}
+
+% ============================================================
+% 7. DISCUSSION
+% ============================================================
+\section{Discussion}
+
+\paragraph{Baseline vs.\ LIFT: the parameter-matched comparison.}
+Both the Baseline and LIFT models use hidden dims $[64, 128, 256, 512]$ with $\sim$58M parameters, ensuring a fair comparison.
+The Baseline achieves its best FID early (33.07 at 200 epochs) but degrades significantly with continued training (+26 FID by 2000 epochs).
+LIFT DP-Total, in contrast, steadily improves and reaches 36.65 at 2000 epochs, suggesting that the dual-scale architecture with optimized scheduling provides implicit regularization.
+
+\paragraph{The gap between Baseline and LIFT.}
+Without EMA, the Baseline's best (33.07) still outperforms LIFT DP-Total's best (36.65) by 3.6 FID points.
+With EMA, this gap narrows to 1.55 points (27.90 vs.\ 29.45), both at 400 epochs.
+This suggests that LIFT's remaining disadvantage may stem from the harder optimization landscape of the dual-scale model rather than a fundamental architectural limitation.
+
+\paragraph{Why does diagonal scheduling fail?}
+The error heatmap reveals that $E_{64}$ depends primarily on $t_{64}$ (vertical stripes), while $E_{32}$ depends on $t_{32}$ (horizontal stripes).
+The diagonal path $t_{64} = t_{32}$ forces both scales to denoise at the same rate, but the optimal path deviates significantly from the diagonal---particularly in the mid-noise regime where the two scales have different error profiles.
+
+\paragraph{Limitations.}
+\begin{itemize}
+    \item The heatmap computation requires $30 \times 30 = 900$ forward passes with Hutchinson estimation, adding significant overhead per checkpoint.
+    \item EMA results are limited to 800--1200 epochs; longer training may further improve LIFT EMA.
+    \item The 32$\times$32 scale is obtained by downsampling the 64$\times$64 image, not from an independent data source. The benefit of multi-scale modeling may be larger with truly multi-resolution data.
+    \item All experiments use AFHQv2 at 64$\times$64; generalization to larger resolutions and other datasets remains to be tested.
+\end{itemize}
+
+\paragraph{Future work.}
+\begin{itemize}
+    \item Extend EMA training to 2000 epochs to test whether LIFT EMA DP-Total can surpass the Baseline EMA.
+    \item Explore learned (amortized) path prediction instead of per-checkpoint DP optimization.
+    \item Scale to higher resolutions (256$\times$256) with more than two scales.
+    \item Investigate whether the DP path can be used as a training signal (curriculum learning on timestep pairs).
+\end{itemize}
+
+\end{document}

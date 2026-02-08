@@ -197,6 +197,14 @@ def chain_rule_factor(snr):
 - `scripts/eval_lift_dp.sh`: Step 3 - Generate images + FID
 - `scripts/eval_baseline.sh`: Evaluate baseline model
 - `scripts/eval_lift.sh`: Evaluate LIFT diagonal mode
+- `scripts/eval_all.sh`: Parallel evaluation on 3 GPUs (non-EMA)
+- `scripts/eval_all_ema.sh`: Parallel EMA evaluation on 3 GPUs
+- `aggregate_results.py`: Aggregate multi-seed FID results (mean±std)
+- `explore_test/`: Experimental single-output architectures (single_t, no_t)
+- `explore_test/eval_fid_batch.py`: Diagonal FID evaluation for explore_test models
+- `explore_test/eval_dp.py`: Heatmap + DP path FID evaluation for explore_test models
+- `explore_test/eval_all.sh`: Parallel launcher (GPU 1: single_t, GPU 3: no_t)
+- `explore_test_2/`: EMA training scripts
 
 ## Experiment Settings
 
@@ -206,8 +214,112 @@ def chain_rule_factor(snr):
 - **Checkpoints**: 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000 epochs
 - **FID evaluation**: 15803 images (full AFHQ training set for stable FID)
 
+## EMA Evaluation
+
+Both `eval_fid_batch.py` and `eval_lift_dp.py` support `--ema` flag to load EMA weights from checkpoints.
+
+```bash
+# Evaluate all EMA models in parallel (3 GPUs)
+./scripts/eval_all_ema.sh              # Single seed
+./scripts/eval_all_ema.sh --multi-seed # 5 seeds with aggregation
+./scripts/eval_all_ema.sh --force      # Force re-evaluation
+
+# Individual EMA evaluation
+python eval_fid_batch.py --model_type baseline --ema --epochs 200 400 --device 0
+python eval_fid_batch.py --model_type lift --ema --epochs 200 400 --device 1
+python eval_lift_dp.py --ema --epochs 200 400 --device 2
+```
+
+EMA checkpoint naming: `baseline_ema_{epoch}ep.pth`, `lift_ema_{epoch}ep.pth`
+
+## Development Guidelines
+
+### Testing Requirement
+Always test code after writing it. For evaluation scripts, run a quick smoke test with reduced parameters before full runs:
+```bash
+# Quick test: 1000 images, single epoch, force re-evaluation
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate diffusion-gpu
+python eval_fid_batch.py --model_type baseline --ema --epochs 200 --device 1 --num_images 1000 --force --output_dir /tmp/eval_test
+python eval_lift_dp.py --ema --epochs 200 --device 1 --num_images 1000 --force --output_dir /tmp/eval_test
+```
+
+### Long-Running GPU Tasks
+Use `screen` for long-running evaluation jobs:
+```bash
+screen -S eval-session
+# Run commands inside screen, then detach with Ctrl+A, D
+# Reattach: screen -r eval-session
+```
+
+Check GPU availability before running:
+```bash
+nvidia-smi --query-gpu=index,memory.free --format=csv
+```
+
 ## Environment
 
 - Conda environment: `diffusion-gpu`
 - Python path: `/home/ylong030/miniconda3/envs/diffusion-gpu/bin/python`
-- Default hidden dims: `[64, 128, 256, 512]` (~58M parameters)
+- Default hidden dims: `[64, 128, 256, 512]` — Baseline: 58.3M params, LIFT: 58.5M params
+- GPUs: 3 available (0, 1, 2); check `nvidia-smi` for free memory before use
+
+## explore_test: Single-Output Experimental Models
+
+### Two Architectures
+
+1. **SingleTimestepModel** (`explore_test/model_single_t.py`): Receives t_64 only
+   - Input: `x_64 [B, 3, 64, 64]`, `x_32_noisy [B, 3, 32, 32]`, `t_64 [B]`
+   - Output: `noise_pred_64 [B, 3, 64, 64]` only
+   - 32×32 provides structural info but model doesn't know its noise level
+
+2. **NoTimestepModel** (`explore_test/model_no_t.py`): Blind denoiser, no timestep
+   - Input: `x_64 [B, 3, 64, 64]`, `x_32_noisy [B, 3, 32, 32]`
+   - Output: `noise_pred_64 [B, 3, 64, 64]` only
+   - No time embedding at all
+
+### Key Design: x_32 from Downsampled x_64
+
+Unlike the main LIFT model where x_32 is independently denoised, explore_test models construct x_32 from x_64:
+
+- **Diagonal mode**: `x_32 = F.interpolate(x_64, 32)` at each step
+- **DP mode**: `x_32 = downsample(pred_x0_64) + noise at t_32_next`
+  1. Get `noise_pred_64` → compute `pred_x0_64` via DDIM formula
+  2. `pred_x0_32 = F.interpolate(pred_x0_64, 32)`
+  3. Re-noise: `x_32 = sqrt(α_t32) * pred_x0_32 + sqrt(1-α_t32) * ε`
+
+### Evaluation
+
+```bash
+cd explore_test
+
+# Diagonal FID
+python eval_fid_batch.py --model_type single_t --epochs 200 400 --device 1
+python eval_fid_batch.py --model_type no_t --epochs 200 400 --device 3
+
+# DP path FID (computes heatmap + optimal path + generates + FID)
+python eval_dp.py --model_type single_t --epochs 200 400 --device 1
+python eval_dp.py --model_type no_t --epochs 200 400 --device 3
+
+# Full parallel evaluation (all epochs, both models)
+./eval_all.sh                    # All epochs
+./eval_all.sh 200 400 600        # Specific epochs
+./eval_all.sh --force            # Force re-evaluation
+```
+
+### Differences from Main Eval Scripts
+
+- Only one DP path type (error_64 only — no error_32 since models don't predict 32×32 noise)
+- Real features cached at parent `results/real_features.npz` (shared)
+- Checkpoints: `explore_test/checkpoints/{single_t,no_t}_{epoch}ep.pth`
+- Results: `explore_test/results/`
+
+## Patterns for Writing New Eval Scripts
+
+When adapting eval scripts for new model architectures:
+
+1. **Reuse shared infrastructure**: Import from parent (`compute_heatmap_30.py`, `scheduler.py`, `data.py`) via `sys.path.insert`
+2. **Share real features cache**: Point to `results/real_features.npz` in parent dir to avoid recomputation
+3. **Adapt generation functions**: The model-specific part is only the forward call; DDIM step, FID computation, grid saving are all reusable
+4. **For heatmap computation**: Only change the closure `f_64(z_in)` to match the model's forward signature
+5. **Smoke test first**: Always test with `--num_images 1000 --force --output_dir /tmp/test` before full runs
+6. **ddim_step returning pred_x0**: When DP generation needs to construct auxiliary inputs (like x_32) from predicted clean images, modify `ddim_step` to also return `pred_original_sample`

@@ -99,7 +99,11 @@ Thumbs.db
 
 # Project specific — avoid pushing large files to GitHub
 checkpoints/
-results/
+results/*
+# Exception: keep figures referenced in README
+!results/heatmap_30_2000ep_64.png
+!results/heatmap_30_2000ep_total.png
+!results/path_comparison_across_epochs.png
 results_10k/
 logs/
 *.log
