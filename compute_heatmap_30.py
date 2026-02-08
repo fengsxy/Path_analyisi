@@ -160,163 +160,6 @@ def compute_error_heatmap_30(model, scheduler, x_batch, device='cpu', K=4):
     return t_grid.cpu(), snr_grid.cpu(), error_64.cpu(), error_32.cpu(), error_total.cpu()
 
 
-def find_optimal_path(error_matrix):
-    """
-    Find optimal path from (0,0) to (29,29) using DP.
-
-    Each step moves exactly one cell: right OR up.
-    Total: 58 steps, 59 points.
-
-    Returns:
-        path: List of (i, j) tuples, length 59
-        total_cost: Total error along path
-    """
-    error_np = error_matrix.numpy() if torch.is_tensor(error_matrix) else error_matrix
-    n = error_np.shape[0]  # 30
-
-    # dp[i][j] = minimum cost to reach (i, j)
-    dp = np.full((n, n), np.inf)
-    parent = np.full((n, n, 2), -1, dtype=int)
-
-    dp[0, 0] = error_np[0, 0]
-
-    # Fill DP table
-    for i in range(n):
-        for j in range(n):
-            if i == 0 and j == 0:
-                continue
-
-            candidates = []
-            if i > 0 and dp[i-1, j] < np.inf:
-                candidates.append((dp[i-1, j], i-1, j))
-            if j > 0 and dp[i, j-1] < np.inf:
-                candidates.append((dp[i, j-1], i, j-1))
-
-            if candidates:
-                best = min(candidates, key=lambda x: x[0])
-                dp[i, j] = best[0] + error_np[i, j]
-                parent[i, j] = [best[1], best[2]]
-
-    # Backtrack to find path
-    path = []
-    i, j = n - 1, n - 1
-    while i >= 0 and j >= 0:
-        path.append((i, j))
-        if i == 0 and j == 0:
-            break
-        pi, pj = parent[i, j]
-        i, j = pi, pj
-
-    path = path[::-1]
-    total_cost = dp[n-1, n-1]
-
-    return path, total_cost
-
-
-def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
-    """
-    Find optimal path from (0,0) to (n-1,n-1) with exactly num_steps steps.
-
-    Cost = integral of error along the path segment, approximated as:
-        (error_start + error_end) / 2 × step_size
-
-    Constraint: each step can move at most max_jump cells in each direction.
-    This prevents unrealistic large jumps that DDIM can't handle well.
-
-    This guarantees:
-    - Start at (0,0) = high noise (t=999)
-    - End at (n-1,n-1) = low noise (t=0)
-    - Exactly num_steps steps (num_steps+1 points)
-    - Each step moves at most max_jump in i and max_jump in j
-    - Minimum total integrated error
-
-    Args:
-        error_matrix: [n, n] error values
-        num_steps: Number of steps (e.g., 18)
-        max_jump: Maximum jump per step in each direction (default 5 ≈ 170 timesteps)
-
-    Returns:
-        path: List of (i, j) tuples, length num_steps+1
-        total_cost: Total integrated error along path
-    """
-    error_np = error_matrix.numpy() if torch.is_tensor(error_matrix) else error_matrix
-    n = error_np.shape[0]  # 30
-
-    INF = float('inf')
-    dp = np.full((n, n, num_steps + 1), INF)
-    parent = np.full((n, n, num_steps + 1, 3), -1, dtype=int)  # (pi, pj, pk)
-
-    dp[0, 0, 0] = 0  # Start with 0 cost (we'll add segment costs)
-
-    # For each step k, compute transitions
-    for k in range(num_steps):
-        for i in range(n):
-            for j in range(n):
-                if dp[i, j, k] == INF:
-                    continue
-
-                # Remaining steps after this one
-                remaining = num_steps - k - 1
-
-                # From (i,j), try reachable (ni, nj) within max_jump
-                for ni in range(i, min(i + max_jump + 1, n)):
-                    for nj in range(j, min(j + max_jump + 1, n)):
-                        if ni == i and nj == j:
-                            continue  # must move
-
-                        # Check if we can reach end from (ni, nj) in remaining steps
-                        dist_to_end = (n - 1 - ni) + (n - 1 - nj)
-                        # With max_jump constraint, we can cover at most 2*max_jump per step
-                        max_reachable = remaining * 2 * max_jump
-                        if dist_to_end > max_reachable:
-                            continue  # can't reach end in time
-                        if remaining == 0 and (ni != n-1 or nj != n-1):
-                            continue  # last step must reach end
-
-                        # Cost = integral of error along segment (trapezoidal)
-                        step_size = (ni - i) + (nj - j)
-                        error_start = error_np[i, j]
-                        error_end = error_np[ni, nj]
-                        step_cost = (error_start + error_end) / 2 * step_size
-
-                        new_cost = dp[i, j, k] + step_cost
-                        if new_cost < dp[ni, nj, k + 1]:
-                            dp[ni, nj, k + 1] = new_cost
-                            parent[ni, nj, k + 1] = [i, j, k]
-
-    # Check if we reached the end
-    if dp[n-1, n-1, num_steps] == INF:
-        print(f"Warning: Cannot reach (n-1,n-1) in exactly {num_steps} steps with max_jump={max_jump}")
-        # Try to find any reachable solution
-        best_k = -1
-        for k in range(num_steps + 1):
-            if dp[n-1, n-1, k] < INF:
-                best_k = k
-        if best_k == -1:
-            # Increase max_jump and retry
-            print(f"Retrying with larger max_jump...")
-            return find_optimal_path_n_steps(error_matrix, num_steps, max_jump=max_jump + 2)
-        print(f"Using {best_k} steps instead")
-        final_k = best_k
-    else:
-        final_k = num_steps
-
-    # Backtrack
-    path = []
-    i, j, k = n - 1, n - 1, final_k
-    while k >= 0:
-        path.append((i, j))
-        if k == 0:
-            break
-        pi, pj, pk = parent[i, j, k]
-        i, j, k = pi, pj, pk
-
-    path = path[::-1]
-    total_cost = dp[n-1, n-1, final_k]
-
-    return path, total_cost
-
-
 def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, max_jump=5):
     """
     Find optimal path from (0,0) to (n-1,n-1) with exactly num_steps steps,
@@ -395,67 +238,6 @@ def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, 
     return path[::-1], dp[n - 1, n - 1, num_steps]
 
 
-def allocate_steps(path, error_matrix, num_steps):
-    """
-    Allocate N sampling points along path based on error distribution.
-
-    Goal: Each segment has approximately equal cumulative error.
-
-    Args:
-        path: List of (i, j) tuples (59 points)
-        error_matrix: Error values
-        num_steps: Number of sampling steps (e.g., 18)
-
-    Returns:
-        sample_indices: Indices into path for sampling points
-        sample_points: List of (i, j) tuples for sampling
-    """
-    error_np = error_matrix.numpy() if torch.is_tensor(error_matrix) else error_matrix
-
-    # Get error at each path point
-    path_errors = [error_np[i, j] for i, j in path]
-    total_error = sum(path_errors)
-    target_per_step = total_error / num_steps
-
-    sample_indices = [0]  # Always include start
-    cumulative = path_errors[0]
-
-    for k in range(1, len(path)):
-        cumulative += path_errors[k]
-
-        # Check if we've accumulated enough error for next sample
-        if cumulative >= target_per_step * len(sample_indices) and len(sample_indices) < num_steps:
-            sample_indices.append(k)
-
-    # Always include end
-    if sample_indices[-1] != len(path) - 1:
-        if len(sample_indices) < num_steps + 1:
-            sample_indices.append(len(path) - 1)
-        else:
-            sample_indices[-1] = len(path) - 1
-
-    # Ensure we have exactly num_steps + 1 points
-    while len(sample_indices) < num_steps + 1:
-        # Add points in largest gaps
-        gaps = []
-        for i in range(len(sample_indices) - 1):
-            gap = sample_indices[i+1] - sample_indices[i]
-            gaps.append((gap, i))
-        gaps.sort(reverse=True)
-
-        if gaps and gaps[0][0] > 1:
-            idx = gaps[0][1]
-            new_point = (sample_indices[idx] + sample_indices[idx+1]) // 2
-            sample_indices.insert(idx + 1, new_point)
-        else:
-            break
-
-    sample_indices = sample_indices[:num_steps + 1]
-    sample_points = [path[k] for k in sample_indices]
-
-    return sample_indices, sample_points
-
-
 def path_to_timesteps(sample_points, t_grid):
     """Convert sample points to actual timesteps.
 
@@ -512,7 +294,7 @@ def plot_heatmap_with_path(t_grid, error_matrix, path, sample_points, output_pat
     plt.close()
 
 
-def plot_comparison(t_grid, error_64, error_total, path_64, path_total,
+def plot_comparison(t_grid, error_64, error_total,
                     samples_64, samples_total, output_path, num_steps=18):
     """Plot comparison of Diagonal, DP-64 and DP-Total paths."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -611,17 +393,11 @@ def main():
         model, scheduler, x_batch, device=device, K=args.K
     )
 
-    # Step 2: Find optimal paths
-    print("\n[Step 2] Finding optimal paths...")
-    path_64, cost_64 = find_optimal_path(error_64)
-    path_total, cost_total = find_optimal_path(error_total)
-    print(f"  DP-64 path cost: {cost_64:.6e}")
-    print(f"  DP-Total path cost: {cost_total:.6e}")
-
-    # Step 3: Find optimal N-step paths (guarantees start and end points)
-    print(f"\n[Step 3] Finding optimal {args.num_steps}-step paths...")
-    samples_64, cost_64_n = find_optimal_path_n_steps(error_64, args.num_steps)
-    samples_total, cost_total_n = find_optimal_path_n_steps(error_total, args.num_steps)
+    # Step 2: Find optimal N-step paths
+    print(f"\n[Step 2] Finding optimal {args.num_steps}-step paths...")
+    log_snr = torch.log(snr_grid)
+    samples_64, cost_64_n = find_optimal_path_n_steps_lambda(error_64, torch.zeros_like(error_64), log_snr, args.num_steps)
+    samples_total, cost_total_n = find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, args.num_steps)
     print(f"  DP-64 ({args.num_steps} steps): cost={cost_64_n:.6e}, points={len(samples_64)}")
     print(f"  DP-Total ({args.num_steps} steps): cost={cost_total_n:.6e}, points={len(samples_total)}")
 
@@ -634,7 +410,6 @@ def main():
     ts_64_64, ts_64_32 = path_to_timesteps(samples_64, t_grid)
     ts_total_64, ts_total_32 = path_to_timesteps(samples_total, t_grid)
 
-    # Verify timesteps end at 0
     print(f"\n  DP-64 timesteps: t_64={ts_64_64[0]}->{ts_64_64[-1]}, t_32={ts_64_32[0]}->{ts_64_32[-1]}")
     print(f"  DP-Total timesteps: t_64={ts_total_64[0]}->{ts_total_64[-1]}, t_32={ts_total_32[0]}->{ts_total_32[-1]}")
 
@@ -647,11 +422,7 @@ def main():
         'error_64': error_64,
         'error_32': error_32,
         'error_total': error_total,
-        'path_64': path_64,  # Full 58-step path
-        'path_total': path_total,
-        'cost_64': cost_64,
-        'cost_total': cost_total,
-        'samples_64': samples_64,  # N-step optimal path
+        'samples_64': samples_64,
         'samples_total': samples_total,
         'cost_64_n': cost_64_n,
         'cost_total_n': cost_total_n,
@@ -667,13 +438,13 @@ def main():
     # Plot
     base = args.output.replace('.png', '')
 
-    plot_heatmap_with_path(t_grid, error_64, path_64, samples_64,
+    plot_heatmap_with_path(t_grid, error_64, None, samples_64,
                            f"{base}_64.png", "64×64 Error with Optimal Path")
 
-    plot_heatmap_with_path(t_grid, error_total, path_total, samples_total,
+    plot_heatmap_with_path(t_grid, error_total, None, samples_total,
                            f"{base}_total.png", "Total Error with Optimal Path")
 
-    plot_comparison(t_grid, error_64, error_total, path_64, path_total,
+    plot_comparison(t_grid, error_64, error_total,
                     samples_64, samples_total, args.output)
 
     # Print summary
@@ -681,7 +452,6 @@ def main():
     print("Summary")
     print("="*60)
     print(f"Heatmap: 30×30")
-    print(f"Path length: {len(path_64)} points (58 steps)")
     print(f"Sampling: {args.num_steps} steps ({len(samples_64)} points)")
     print(f"\nDP-64 timesteps (t_64): {ts_64_64[:5]}...{ts_64_64[-3:]}")
     print(f"DP-64 timesteps (t_32): {ts_64_32[:5]}...{ts_64_32[-3:]}")

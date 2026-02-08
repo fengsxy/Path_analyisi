@@ -29,7 +29,6 @@ from data import AFHQ64Dataset
 # Import heatmap functions
 from compute_heatmap_30 import (
     compute_error_heatmap_30,
-    find_optimal_path,
     find_optimal_path_n_steps_lambda,
     path_to_timesteps,
     plot_comparison
@@ -270,11 +269,6 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
         model, scheduler, x_batch, device=device, K=4
     )
 
-    # Find optimal full paths (58 steps)
-    print("Finding optimal full paths...", flush=True)
-    path_64, cost_64 = find_optimal_path(error_64)
-    path_total, cost_total = find_optimal_path(error_total)
-
     # Find optimal N-step paths
     print(f"Finding optimal {num_steps}-step paths...", flush=True)
     log_snr = torch.log(snr_grid)
@@ -296,10 +290,6 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
         'error_64': error_64,
         'error_32': error_32,
         'error_total': error_total,
-        'path_64': path_64,
-        'path_total': path_total,
-        'cost_64': cost_64,
-        'cost_total': cost_total,
         'samples_64': samples_64,
         'samples_total': samples_total,
         'cost_64_n': cost_64_n,
@@ -314,7 +304,7 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
 
     # Plot
     plot_path = os.path.join(output_dir, f'heatmap_30{heatmap_suffix}_{epoch}ep.png')
-    plot_comparison(t_grid, error_64, error_total, path_64, path_total,
+    plot_comparison(t_grid, error_64, error_total,
                     samples_64, samples_total, plot_path)
 
     del model
@@ -475,7 +465,7 @@ def main():
         )
         print(f"  FID (DP-Total): {fid_dp_total:.2f}", flush=True)
 
-        results.append((epoch, fid_dp64, fid_dp_total, heatmap_data['cost_64'], heatmap_data['cost_total']))
+        results.append((epoch, fid_dp64, fid_dp_total, heatmap_data['cost_64_n'], heatmap_data['cost_total_n']))
 
     # Save results
     csv_path = os.path.join(args.output_dir, f'fid_lift{ema_suffix}_dp_results.csv')

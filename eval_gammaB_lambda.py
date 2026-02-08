@@ -105,14 +105,6 @@ timesteps_64, timesteps_32 = path_to_timesteps(path, t_grid)
 print(f"  t_64: {timesteps_64}", flush=True)
 print(f"  t_32: {timesteps_32}", flush=True)
 
-# Reference: γ_B + grid path
-from compute_heatmap_30 import find_optimal_path_n_steps
-path_B_grid, cost_B_grid = find_optimal_path_n_steps(error_64_B + error_32_B, 18)
-ts_B_64, ts_B_32 = path_to_timesteps(path_B_grid, t_grid)
-print(f"\n  [Reference] γ_B + grid path:", flush=True)
-print(f"  t_64: {ts_B_64}", flush=True)
-print(f"  t_32: {ts_B_32}", flush=True)
-
 # 3) Load real features
 print(f"\nLoading real features ({NUM_IMAGES} images)...", flush=True)
 feat_real = load_real_features(NUM_IMAGES, device)

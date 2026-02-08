@@ -36,8 +36,7 @@ from compute_heatmap_30 import (
     timestep_to_snr,
     add_noise_at_timestep,
     get_vHv,
-    find_optimal_path,
-    find_optimal_path_n_steps,
+    find_optimal_path_n_steps_lambda,
     path_to_timesteps,
 )
 
@@ -324,8 +323,10 @@ def compute_or_load_heatmap(checkpoint_path, model_type, epoch, device, output_d
         print(f"Computing optimal {num_steps}-step path...", flush=True)
         t_grid = data['t_grid']
         error_64 = data['error_64']
+        snr_grid = data['snr_grid']
+        log_snr = torch.log(snr_grid)
 
-        samples, cost_n = find_optimal_path_n_steps(error_64, num_steps)
+        samples, cost_n = find_optimal_path_n_steps_lambda(error_64, torch.zeros_like(error_64), log_snr, num_steps)
         ts_64, ts_32 = path_to_timesteps(samples, t_grid)
 
         print(f"  DP: {len(samples)} points, {samples[0]} -> {samples[-1]}", flush=True)
@@ -348,13 +349,10 @@ def compute_or_load_heatmap(checkpoint_path, model_type, epoch, device, output_d
         model, model_type, scheduler, x_batch, device=device, K=4
     )
 
-    # Find optimal full path (58 steps)
-    print("Finding optimal full path...", flush=True)
-    path_full, cost_full = find_optimal_path(error_64)
-
     # Find optimal N-step path
     print(f"Finding optimal {num_steps}-step path...", flush=True)
-    samples, cost_n = find_optimal_path_n_steps(error_64, num_steps)
+    log_snr = torch.log(snr_grid)
+    samples, cost_n = find_optimal_path_n_steps_lambda(error_64, torch.zeros_like(error_64), log_snr, num_steps)
     ts_64, ts_32 = path_to_timesteps(samples, t_grid)
 
     print(f"  DP: {len(samples)} points, {samples[0]} -> {samples[-1]}", flush=True)
@@ -364,8 +362,6 @@ def compute_or_load_heatmap(checkpoint_path, model_type, epoch, device, output_d
         't_grid': t_grid,
         'snr_grid': snr_grid,
         'error_64': error_64,
-        'path_full': path_full,
-        'cost_full': cost_full,
         'samples': samples,
         'cost_n': cost_n,
         'timesteps': {'t_64': ts_64, 't_32': ts_32},
@@ -503,7 +499,7 @@ def main():
         )
         print(f"  FID (DP): {fid_dp:.2f}", flush=True)
 
-        results.append((epoch, fid_dp, heatmap_data['cost_full']))
+        results.append((epoch, fid_dp, heatmap_data['cost_n']))
 
     csv_path = os.path.join(args.output_dir, f'fid_{args.model_type}_dp_results.csv')
     with open(csv_path, 'w') as f:

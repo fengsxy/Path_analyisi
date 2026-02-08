@@ -35,8 +35,7 @@ import sys
 import torch
 import numpy as np
 from compute_heatmap_30 import (
-    find_optimal_path,
-    find_optimal_path_n_steps,
+    find_optimal_path_n_steps_lambda,
     path_to_timesteps,
     plot_heatmap_with_path,
     plot_comparison
@@ -58,16 +57,15 @@ for epoch in epochs:
         continue
 
     t_grid = data['t_grid']
+    snr_grid = data['snr_grid']
     error_64 = data['error_64']
+    error_32 = data['error_32']
     error_total = data['error_total']
+    log_snr = torch.log(snr_grid)
 
-    # Find full paths (58 steps)
-    path_64, cost_64 = find_optimal_path(error_64)
-    path_total, cost_total = find_optimal_path(error_total)
-
-    # Find N-step paths
-    samples_64, cost_64_n = find_optimal_path_n_steps(error_64, num_steps)
-    samples_total, cost_total_n = find_optimal_path_n_steps(error_total, num_steps)
+    # Find N-step paths using lambda-space DP
+    samples_64, cost_64_n = find_optimal_path_n_steps_lambda(error_64, torch.zeros_like(error_64), log_snr, num_steps)
+    samples_total, cost_total_n = find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps)
 
     # Convert to timesteps
     ts_64_64, ts_64_32 = path_to_timesteps(samples_64, t_grid)
@@ -79,13 +77,13 @@ for epoch in epochs:
     # Plot
     base = f"{results_dir}/heatmap_30_{epoch}ep"
 
-    plot_heatmap_with_path(t_grid, error_64, path_64, samples_64,
+    plot_heatmap_with_path(t_grid, error_64, None, samples_64,
                            f"{base}_64.png", f"64×64 Error (Epoch {epoch})")
 
-    plot_heatmap_with_path(t_grid, error_total, path_total, samples_total,
+    plot_heatmap_with_path(t_grid, error_total, None, samples_total,
                            f"{base}_total.png", f"Total Error (Epoch {epoch})")
 
-    plot_comparison(t_grid, error_64, error_total, path_64, path_total,
+    plot_comparison(t_grid, error_64, error_total,
                     samples_64, samples_total, f"{base}.png")
 
 print("\nDone!")

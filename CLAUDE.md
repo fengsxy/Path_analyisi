@@ -99,21 +99,25 @@ error_z = error_xt * γ(SNR)
 
 This ensures error decays as SNR⁻² at high SNR (theoretical expectation from stochastic localization).
 
-### Key Insight: Cost = Error × Step Size
+### Key Insight: Cost = Error × Δλ (logSNR Step Size)
 
 Simply minimizing `Σ error[i]` leads to unrealistic paths (e.g., jumping from t=999 to t=0 in one step).
 
-**The fix**: Cost should be the **integral of error along the path segment**:
+**The fix**: Cost should be the **integral of error along the path segment in logSNR (λ) space**:
 ```python
-step_cost = (error_start + error_end) / 2 × step_size  # Trapezoidal rule
+# Each scale's error is weighted by its own Δλ step size
+step_cost = (e64_start + e64_end)/2 × |Δλ_64| + (e32_start + e32_end)/2 × |Δλ_32|
 ```
 
-This penalizes large jumps through high-error regions, matching the continuous integral in AYS.
+Using Δλ (logSNR distance) instead of grid-index distance is physically meaningful:
+- Grid indices are uniformly spaced, but logSNR spacing is non-uniform
+- Δλ correctly measures the "distance" in the diffusion ODE's natural coordinate
+- Empirically improves FID by ~0.5 over grid-index distance (29.45 → 28.91 on EMA 400ep)
 
 ### DP Algorithm with Constraints
 
 ```python
-def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
+def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, max_jump=5):
     """
     Find optimal N-step path from (0,0) to (29,29).
 
@@ -122,27 +126,33 @@ def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
     - Each step moves at most max_jump cells in each direction
     - Must reach endpoint (guarantees t_64=0, t_32=0)
 
-    Cost function:
-    - Trapezoidal integral: (error_start + error_end) / 2 × step_size
+    Cost function (λ-space trapezoidal integral):
+    - (e64[i,j] + e64[ni,nj])/2 × |Δλ_64| + (e32[i,j] + e32[ni,nj])/2 × |Δλ_32|
+    - where Δλ = |log_snr[ni] - log_snr[i]|
     """
     # dp[i][j][k] = min cost to reach (i,j) in k steps
     # Transition: try all (ni, nj) within max_jump distance
 ```
 
+For **DP-64** (single-scale): pass `error_32=zeros` so only the 64-scale error contributes.
+For **DP-Total** (dual-scale): pass both `error_64` and `error_32`.
+
 ### Why max_jump Constraint?
 
-Without it, DP exploits the fact that error_64 only depends on t_64 (vertical stripes in heatmap):
-- It would jump t_64 from 999→0 in one step
+Without it, DP exploits the structure of the error landscape:
+- It would jump t_64 from 999→0 in one step (since Δλ cost is small at high SNR)
 - Then slowly decrease t_32
 
 With `max_jump=5` (~170 timesteps per step), the path is forced to be more gradual and realistic for DDIM.
 
 ### Two Path Types
 
-1. **DP-64**: Optimize using error_64 only (64×64 scale error)
+1. **DP-64**: Optimize using error_64 only (64×64 scale error, error_32=0)
+   - Cost = `(e64_start + e64_end)/2 × |Δλ_64|`
    - Path tends to prioritize t_64 reduction
 
-2. **DP-Total**: Optimize using error_64 + error_32 (total error)
+2. **DP-Total**: Optimize using error_64 + error_32 (both scales, weighted by respective Δλ)
+   - Cost = `(e64_start + e64_end)/2 × |Δλ_64| + (e32_start + e32_end)/2 × |Δλ_32|`
    - Path is more balanced, closer to diagonal
    - Generally recommended
 

@@ -93,6 +93,54 @@ With EMA, LIFT DP-Total (29.45) nearly matches Baseline (27.90)—a gap of only 
 
 single_t DP (38.63) outperforms no_t DP (50.76), confirming that timestep conditioning helps even in single-output models.
 
+### 5. "Low Guides High" — Coarse Scale Denoises First
+
+A striking emergent property: **all DP-Total paths consistently denoise the 32×32 (coarse) scale faster than the 64×64 (fine) scale**. Across every epoch and both EMA and non-EMA models, 17 out of 19 path points have t_32 ahead of t_64 (i.e., 32×32 is cleaner), with 0 points where t_64 is ahead.
+
+```
+DP-Total path (EMA 400ep):
+  t_64: 999 → 964 → 930 → 895 → 861 → 861 → 826 → 792 → ... → 0
+  t_32: 999 → 964 → 964 → 930 → 895 → 861 → 826 → 792 → ... → 0
+                     ^^^                ^^^
+              32 stays while 64    32 catches up, then
+              advances first       64 advances again
+```
+
+| Epoch | Steps with t_32 cleaner | Steps with t_64 cleaner | Max deviation |
+|------:|:-----------------------:|:-----------------------:|:-------------:|
+| 400   | 17/19 | 0/19 | 8 grid cells |
+| 800   | 17/19 | 0/19 | 4 grid cells |
+| 1200  | 17/19 | 0/19 | 7 grid cells |
+| 2000  | 17/19 | 0/19 | 7 grid cells |
+| EMA 400  | 17/19 | 0/19 | — |
+| EMA 800  | 17/19 | 0/19 | — |
+| EMA 1200 | 17/19 | 0/19 | — |
+
+**Interpretation**: The model learns an asymmetric coupling between scales — a cleaner coarse scale provides structural guidance that helps denoise the fine scale. The DP algorithm discovers this automatically by minimizing discretization error: denoising 32×32 first reduces the total error because the coarse-to-fine information flow (J_HL: ∂ε_64/∂x_32) benefits from a cleaner coarse input.
+
+**Cross-Jacobian evidence**: The two scales are not fully decoupled. Cross-Jacobian analysis (EMA 400ep) reveals a clear "low guides high" pattern:
+
+![Cross-Jacobian Analysis](results/cross_jacobian_analysis_400ep.png)
+
+The raw Jacobian J_HL = ||∂ε_64/∂x_32||² (before chain-rule factor) shows:
+
+| (t_64, t_32) | Raw J_HL | Interpretation |
+|:------------:|:--------:|:--------------|
+| (999, 999) — both noisy | 2.9e-7 | No cross-influence |
+| (999, 0) — **noisy 64, clean 32** | **1.9e-3** | **6400× stronger** |
+| (0, 999) — clean 64, noisy 32 | 2.5e-5 | Weak reverse influence |
+| (0, 0) — both clean | 5.3e-1 | High sensitivity (both precise) |
+
+The ratio J_HL/J_HH (cross vs self influence on 64×64) increases monotonically as t_32 decreases (32 gets cleaner):
+
+| t_32 | 999 | 826 | 654 | 482 | 310 | 137 |
+|------|-----|-----|-----|-----|-----|-----|
+| J_HL/J_HH at t_64=999 | 0.04% | 0.07% | 0.11% | 0.16% | 0.20% | **0.72%** |
+
+While cross-Jacobians are small in absolute terms, the trend is unambiguous: **the cleaner the 32×32 input, the more it influences the 64×64 prediction**. This confirms that the model learns to use coarse-scale structural information when available.
+
+**Connection to γ_D chain-rule factor**: The alternative chain-rule factor γ_D = SNR/(4(1+SNR)²) produces an extreme version of this pattern — an L-shaped path that denoises 32×32 almost completely before starting on 64×64. However, this extreme strategy performs worse (FID 35.17 vs 28.91 with γ_B), suggesting that while "coarse first" is beneficial, pushing it too far is counterproductive. The optimal strategy is a moderate asymmetry where 32×32 leads by a few steps, not a complete sequential ordering.
+
 ## Visualizations
 
 ### Optimal Path Visualization (2000 epochs)
@@ -150,54 +198,28 @@ def chain_rule_factor(snr):
 
 The key insight is treating timestep scheduling as a **2D path optimization problem**. Given a 30×30 error heatmap, we find the optimal N-step path from (0,0) to (29,29) using dynamic programming.
 
-**Cost Function**: Trapezoidal integral of error along path segment
+**Cost Function**: Trapezoidal integral of error in λ-space (logSNR), with each scale weighted by its own Δλ
 ```python
-step_cost = (error[i,j] + error[ni,nj]) / 2 * step_size
+step_cost = (e64[i,j] + e64[ni,nj])/2 * |Δλ_64| + (e32[i,j] + e32[ni,nj])/2 * |Δλ_32|
 ```
-where `step_size = (ni - i) + (nj - j)` is the Manhattan distance.
+where `Δλ_64 = |log_snr[ni] - log_snr[i]|` is the logSNR distance for the 64×64 scale.
+
+Using Δλ instead of grid-index distance is physically meaningful: grid indices are uniformly spaced, but logSNR spacing is non-uniform. Δλ correctly measures distance in the diffusion ODE's natural coordinate.
+
+- **DP-64**: `e32 = 0` (only 64×64 error matters)
+- **DP-Total**: both `e64` and `e32` contribute (recommended)
 
 **Constraints**:
 - Path must be monotonically increasing (can only move right/down)
 - Maximum jump per step: `max_jump = 5` grid cells in each dimension
 - This prevents unrealistic large jumps (e.g., t=999 → t=0 in one step)
 
-**Why trapezoidal integral?**
-- Simple `error[ni,nj]` allows jumping to low-error regions (t≈0) immediately
-- `error * step_size` still favors large jumps because error at t≈0 is tiny
-- Trapezoidal integral properly accounts for error accumulated along the entire segment
-
 ```python
-def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
-    """Find optimal N-step path using DP with trapezoidal cost."""
-    N = error_matrix.shape[0]
-    INF = float('inf')
-
-    # dp[step][i][j] = min cost to reach (i,j) in exactly `step` steps
-    dp = [[[INF] * N for _ in range(N)] for _ in range(num_steps)]
-    parent = [[[None] * N for _ in range(N)] for _ in range(num_steps)]
-
-    dp[0][0][0] = 0
-
-    for step in range(num_steps - 1):
-        for i in range(N):
-            for j in range(N):
-                if dp[step][i][j] == INF:
-                    continue
-                for ni in range(i, min(i + max_jump + 1, N)):
-                    for nj in range(j, min(j + max_jump + 1, N)):
-                        if ni == i and nj == j:
-                            continue
-                        step_size = (ni - i) + (nj - j)
-                        cost = (error[i,j] + error[ni,nj]) / 2 * step_size
-                        if dp[step][i][j] + cost < dp[step+1][ni][nj]:
-                            dp[step+1][ni][nj] = dp[step][i][j] + cost
-                            parent[step+1][ni][nj] = (i, j)
-
-    # Backtrack from (N-1, N-1)
-    path = [(N-1, N-1)]
-    for step in range(num_steps-1, 0, -1):
-        path.append(parent[step][path[-1][0]][path[-1][1]])
-    return path[::-1]
+def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, max_jump=5):
+    """Find optimal N-step path using DP with λ-space trapezoidal cost."""
+    # dp[i][j][k] = min cost to reach (i,j) in exactly k steps
+    # Transition: try all (ni, nj) within max_jump distance
+    # Cost: (e64[i,j]+e64[ni,nj])/2 * |Δλ_64| + (e32[i,j]+e32[ni,nj])/2 * |Δλ_32|
 ```
 
 ## Model Architecture
