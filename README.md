@@ -23,42 +23,46 @@ A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with
 
 | Epoch | Baseline EMA | LIFT EMA Diag | LIFT EMA DP-64 | LIFT EMA DP-Total |
 |------:|-------------:|--------------:|---------------:|------------------:|
-| 200   | **28.22** | 38.54 | 34.10 | 37.45 |
-| 400   | **27.90** | 31.04 | 29.87 | 29.45 |
-| 600   | **30.00** | 35.94 | 34.22 | 30.16 |
-| 800   | **31.52** | 44.32 | 38.36 | 31.37 |
-| 1000  | ---       | 46.12 | 38.35 | **31.32** |
-| 1200  | ---       | 46.83 | 37.49 | **31.74** |
+| 200   | **28.22** | 38.54 | 36.16 | 36.83 |
+| 400   | **27.90** | 31.04 | 29.68 | 28.91 |
+| 600   | **30.00** | 35.94 | 32.78 | 31.37 |
+| 800   | **31.52** | 44.32 | 35.90 | 34.70 |
+| 1000  | ---       | 46.12 | 35.05 | **34.95** |
+| 1200  | ---       | 46.83 | 35.72 | **35.49** |
+| 1400  | ---       | ---   | 35.97 | **35.92** |
+| 1600  | ---       | ---   | 36.53 | **36.51** |
+| 1800  | ---       | ---   | 37.69 | **37.80** |
+| 2000  | ---       | ---   | 39.12 | **38.55** |
 
 ### Ablation: Single-Output Architectures (single seed)
 
 | Epoch | single_t Diag | single_t DP | no_t Diag | no_t DP |
 |------:|--------------:|------------:|----------:|--------:|
-| 200   | 231.23 | 61.90 | 241.14 | 118.28 |
-| 400   | 209.82 | 45.16 | 230.22 | 57.92 |
-| 600   | 219.00 | **38.63** | 196.65 | 50.76 |
-| 800   | 231.28 | 42.52 | 177.12 | 65.01 |
-| 1000  | 220.37 | 46.23 | 170.03 | 81.40 |
-| 1200  | 243.62 | 48.42 | **167.26** | 75.91 |
-| 1400  | 250.40 | 45.30 | 167.25 | 56.43 |
-| 1600  | 261.03 | 48.49 | 180.69 | 82.68 |
-| 1800  | 256.19 | 60.19 | 187.47 | 73.21 |
-| 2000  | 259.67 | 51.99 | 193.21 | 70.71 |
+| 200   | 231.23 | 47.27 | 241.14 | 116.30 |
+| 400   | 209.82 | 43.40 | 230.22 | 94.66 |
+| 600   | 219.00 | **34.42** | 196.65 | **61.68** |
+| 800   | 231.28 | 41.08 | 177.12 | 70.96 |
+| 1000  | 220.37 | 40.90 | 170.03 | 123.01 |
+| 1200  | 243.62 | 46.40 | **167.26** | 130.02 |
+| 1400  | 250.40 | 40.07 | 167.25 | 92.26 |
+| 1600  | 261.03 | 40.55 | 180.69 | 93.41 |
+| 1800  | 256.19 | 48.80 | 187.47 | 92.91 |
+| 2000  | 259.67 | 41.67 | 193.21 | 63.60 |
 
 ### Summary of Best FID
 
 | Model | Best FID | Epoch | Notes |
 |-------|----------|-------|-------|
 | Baseline EMA | **27.90** | 400 | Single seed |
-| LIFT EMA DP-Total | **29.45** | 400 | Single seed |
-| LIFT EMA DP-64 | 29.87 | 400 | Single seed |
+| LIFT EMA DP-Total | **28.91** | 400 | Single seed |
+| LIFT EMA DP-64 | 29.68 | 400 | Single seed |
 | LIFT EMA Diagonal | 31.04 | 400 | Single seed |
 | Baseline | 33.07±0.13 | 200 | 5-seed |
+| single_t DP | 34.42 | 600 | Ablation |
 | LIFT DP-Total | 36.65±0.23 | 2000 | 5-seed |
-| single_t DP | 38.63 | 600 | Ablation |
 | LIFT DP-64 | 48.39±0.26 | 800 | 5-seed |
 | LIFT Diagonal | 49.07±0.44 | 800 | 5-seed |
-| no_t DP | 50.76 | 600 | Ablation |
+| no_t DP | 61.68 | 600 | Ablation |
 
 ## Key Findings
 
@@ -75,7 +79,7 @@ DP-Total consistently outperforms Diagonal by 8-33 FID points. The effect is eve
 
 ### 2. EMA Closes the Gap
 
-With EMA, LIFT DP-Total (29.45) nearly matches Baseline (27.90)—a gap of only 1.55 FID points, compared to 3.6 points without EMA.
+With EMA, LIFT DP-Total (28.91) nearly matches Baseline (27.90)—a gap of only 1.01 FID points, compared to 3.6 points without EMA.
 
 ### 3. LIFT DP-Total Shows Training Stability
 
@@ -88,10 +92,10 @@ With EMA, LIFT DP-Total (29.45) nearly matches Baseline (27.90)—a gap of only 
 
 | Model | Diagonal | DP | DP Improvement |
 |-------|----------|-----|----------------|
-| single_t (has t_64) | 209.82 | **38.63** | 171 points |
-| no_t (no timestep) | 167.25 | **50.76** | 117 points |
+| single_t (has t_64) | 209.82 | **34.42** | 175 points |
+| no_t (no timestep) | 167.25 | **61.68** | 106 points |
 
-single_t DP (38.63) outperforms no_t DP (50.76), confirming that timestep conditioning helps even in single-output models.
+single_t DP (34.42) outperforms no_t DP (61.68), confirming that timestep conditioning helps even in single-output models.
 
 ### 5. "Low Guides High" — Coarse Scale Denoises First
 
@@ -129,7 +133,6 @@ The raw Jacobian J_HL = ||∂ε_64/∂x_32||² (before chain-rule factor) shows:
 | (999, 999) — both noisy | 2.9e-7 | No cross-influence |
 | (999, 0) — **noisy 64, clean 32** | **1.9e-3** | **6400× stronger** |
 | (0, 999) — clean 64, noisy 32 | 2.5e-5 | Weak reverse influence |
-| (0, 0) — both clean | 5.3e-1 | High sensitivity (both precise) |
 
 The ratio J_HL/J_HH (cross vs self influence on 64×64) increases monotonically as t_32 decreases (32 gets cleaner):
 
