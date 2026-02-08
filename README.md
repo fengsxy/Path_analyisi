@@ -166,6 +166,16 @@ The heatmaps show discretization error across the 2D timestep space (t_64 × t_3
 - **DP-64 paths converge after 1200ep** with L-shaped trajectory
 - Early epochs (400, 800) show different paths due to undertrained model
 
+### EMA Optimal Path Visualization (400 epochs)
+
+| 64×64 Error Heatmap (EMA) | Total Error Heatmap (EMA) |
+|:--------------------------:|:-------------------------:|
+| ![EMA DP-64 Path](results/heatmap_30_ema_400ep_64.png) | ![EMA DP-Total Path](results/heatmap_30_ema_400ep_total.png) |
+
+### EMA Path Convergence Across Epochs
+
+![EMA Path Comparison](results/path_comparison_ema_across_epochs.png)
+
 ## Technical Details
 
 ### Discretization Error (vHv) Computation
@@ -227,6 +237,8 @@ def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, 
 
 ## Model Architecture
 
+### LIFT Dual-Timestep Model (58.5M params)
+
 ```
 Input Processing:
   x_64 [B, 3, 64, 64] ─────────────────┐
@@ -238,23 +250,58 @@ Time Embedding:
                                  ├─ concat ─→ MLP ─→ t_combined
   t_32 ─→ SinusoidalEmb ─→ MLP ─┘
 
-UNet Architecture:
-  Encoder: [64, 128, 256, 512] channels
-  - ResBlock + ResBlock + Attention (if channels >= 128)
-  - Downsample 2×
-
-  Bottleneck: 512 channels
-  - ResBlock + Attention + ResBlock
-
-  Decoder: [512, 256, 128, 64] channels
-  - Upsample 2×
-  - Skip connection (concat)
-  - ResBlock + ResBlock + Attention (if channels >= 128)
+UNet: [64, 128, 256, 512] channels
+  Encoder → Bottleneck → Decoder (with skip connections)
+  Attention at channels >= 128
 
 Output Processing:
   [B, 6, 64, 64] ─→ split ─→ noise_pred_64 [B, 3, 64, 64]
                           ─→ downsample 2× ─→ noise_pred_32 [B, 3, 32, 32]
 ```
+
+### Baseline Model (58.3M params)
+
+```
+Input:  x_64 [B, 3, 64, 64]
+Time:   t ─→ SinusoidalEmb ─→ MLP ─→ t_emb
+UNet:   [64, 128, 256, 512] channels (same as LIFT)
+Output: noise_pred_64 [B, 3, 64, 64]
+```
+
+Single-scale only. No 32×32 input or output.
+
+### Ablation: SingleTimestepModel (single_t)
+
+```
+Input Processing:
+  x_64 [B, 3, 64, 64] ─────────────────┐
+                                        ├─ concat ─→ [B, 6, 64, 64]
+  x_32 [B, 3, 32, 32] ─→ upsample 2× ──┘
+
+Time Embedding:
+  t_64 ─→ SinusoidalEmb ─→ MLP ─→ t_emb    (t_32 unknown to model)
+
+UNet: [64, 128, 256, 512] channels
+Output: noise_pred_64 [B, 3, 64, 64] only
+```
+
+Receives x_32 as structural context but doesn't know its noise level. Only predicts 64×64 noise.
+
+### Ablation: NoTimestepModel (no_t)
+
+```
+Input Processing:
+  x_64 [B, 3, 64, 64] ─────────────────┐
+                                        ├─ concat ─→ [B, 6, 64, 64]
+  x_32 [B, 3, 32, 32] ─→ upsample 2× ──┘
+
+Time Embedding: None (blind denoiser)
+
+UNet: [64, 128, 256, 512] channels
+Output: noise_pred_64 [B, 3, 64, 64] only
+```
+
+No timestep conditioning at all. Tests whether the model can denoise purely from visual structure.
 
 ## Quick Start
 

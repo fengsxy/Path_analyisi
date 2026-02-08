@@ -105,6 +105,9 @@ results/*
 !results/heatmap_30_2000ep_total.png
 !results/path_comparison_across_epochs.png
 !results/cross_jacobian_analysis_400ep.png
+!results/heatmap_30_ema_400ep_64.png
+!results/heatmap_30_ema_400ep_total.png
+!results/path_comparison_ema_across_epochs.png
 results_10k/
 logs/
 *.log
