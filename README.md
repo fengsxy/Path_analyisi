@@ -68,7 +68,7 @@ A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with
 
 ### 1. DP Path Optimization is Critical
 
-DP-Total consistently outperforms Diagonal by 8-33 FID points. The effect is even more dramatic in ablation models (single_t: 219→38.6, a 180-point improvement).
+DP-Total consistently outperforms Diagonal by 8-33 FID points. The effect is even more dramatic in ablation models (single_t: 219→34.42, a 185-point improvement).
 
 | Epoch | Diagonal | DP-Total | Improvement |
 |------:|---------:|---------:|------------:|
@@ -103,11 +103,11 @@ A striking emergent property: **all DP-Total paths consistently denoise the 32×
 
 ```
 DP-Total path (EMA 400ep):
-  t_64: 999 → 964 → 930 → 895 → 861 → 861 → 826 → 792 → ... → 0
-  t_32: 999 → 964 → 964 → 930 → 895 → 861 → 826 → 792 → ... → 0
-                     ^^^                ^^^
-              32 stays while 64    32 catches up, then
-              advances first       64 advances again
+  t_64: 999 → 999 → 999 → 964 → 930 → 930 → 895 → 895 → 861 → ... → 0
+  t_32: 999 → 964 → 930 → 895 → 895 → 861 → 861 → 826 → 792 → ... → 0
+              ^^^    ^^^
+        32 advances while    Both advance, but 32
+        64 stays at 999      stays consistently ahead
 ```
 
 | Epoch | Steps with t_32 cleaner | Steps with t_64 cleaner | Max deviation |
@@ -165,12 +165,6 @@ The heatmaps show discretization error across the 2D timestep space (t_64 × t_3
 - **DP-Total paths converge after 1200ep** (green/blue/purple lines overlap)
 - **DP-64 paths converge after 1200ep** with L-shaped trajectory
 - Early epochs (400, 800) show different paths due to undertrained model
-
-### EMA Optimal Path Visualization (400 epochs)
-
-| 64×64 Error Heatmap (EMA) | Total Error Heatmap (EMA) |
-|:--------------------------:|:-------------------------:|
-| ![EMA DP-64 Path](results/heatmap_30_ema_400ep_64.png) | ![EMA DP-Total Path](results/heatmap_30_ema_400ep_total.png) |
 
 ### EMA Path Convergence Across Epochs
 
