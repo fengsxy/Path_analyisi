@@ -63,6 +63,36 @@ class AFHQ64Dataset(Dataset):
         return self.transform(img)
 
 
+class CelebAHQ64Dataset(Dataset):
+    """CelebA-HQ 64x64 dataset from HuggingFace."""
+
+    def __init__(self, split='train', cache_dir=None):
+        self.dataset = datasets.load_dataset(
+            "mattymchen/celeba-hq",
+            split=split,
+            cache_dir=cache_dir
+        )
+        self.transform = self._get_transform()
+
+    def _get_transform(self):
+        from torchvision import transforms
+        return transforms.Compose([
+            transforms.Resize(64),
+            transforms.CenterCrop(64),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        ])
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img = self.dataset[idx]['image']
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        return self.transform(img)
+
+
 class MNIST64Dataset(Dataset):
     """MNIST upscaled to 64x64."""
 

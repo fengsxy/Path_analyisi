@@ -144,6 +144,40 @@ While cross-Jacobians are small in absolute terms, the trend is unambiguous: **t
 
 **Connection to γ_D chain-rule factor**: The alternative chain-rule factor γ_D = SNR/(4(1+SNR)²) produces an extreme version of this pattern — an L-shaped path that denoises 32×32 almost completely before starting on 64×64. However, this extreme strategy performs worse (FID 35.17 vs 28.91 with γ_B), suggesting that while "coarse first" is beneficial, pushing it too far is counterproductive. The optimal strategy is a moderate asymmetry where 32×32 leads by a few steps, not a complete sequential ordering.
 
+### 6. Super-Resolution (32→64)
+
+LIFT naturally supports conditional super-resolution: by setting t_32=0 (clean 32×32 input) and denoising only x_64 from pure noise, the model acts as a 32→64 SR network. No retraining is needed — the model was trained with all (t_64, t_32) pairs including t_32=0.
+
+![SR Comparison](explore_test_4/results/sr_comparison_ema_400ep.png)
+
+| Epoch | Bicubic PSNR | SR PSNR | Bicubic SSIM | SR SSIM | Bicubic LPIPS | SR LPIPS |
+|------:|:------------:|:-------:|:------------:|:-------:|:-------------:|:--------:|
+| 200   | 30.44 | 26.29 | 0.9477 | 0.9146 | 0.0566 | **0.0272** |
+| 400   | 30.44 | 28.11 | 0.9477 | 0.9286 | 0.0566 | **0.0218** |
+| 600   | 30.44 | 28.83 | 0.9477 | 0.9342 | 0.0566 | **0.0204** |
+| 800   | 30.44 | 29.42 | 0.9477 | 0.9392 | 0.0566 | **0.0185** |
+| 1000  | 30.44 | 29.85 | 0.9477 | 0.9433 | 0.0566 | **0.0171** |
+| 2000  | 30.44 | **30.99** | 0.9477 | **0.9539** | 0.0566 | **0.0138** |
+
+At 2000 epochs, LIFT SR **surpasses bicubic on all three metrics** — PSNR, SSIM, and LPIPS (4× better perceptually). Earlier epochs show the classic perception-distortion tradeoff (sharper details at the cost of pixel-level fidelity), but with sufficient training the model achieves both.
+
+#### Out-of-Distribution: CelebA-HQ (human faces)
+
+To test generalization, we evaluate the same AFHQ-trained model on CelebA-HQ (human faces it has never seen):
+
+![CelebA SR Comparison](explore_test_4/results/sr_comparison_celeba_ema_400ep.png)
+
+| Epoch | Bicubic PSNR | SR PSNR | Bicubic SSIM | SR SSIM | Bicubic LPIPS | SR LPIPS |
+|------:|:------------:|:-------:|:------------:|:-------:|:-------------:|:--------:|
+| 200   | 30.48 | 26.03 | 0.9491 | 0.9013 | 0.0547 | **0.0309** |
+| 400   | 30.48 | 27.04 | 0.9491 | 0.9030 | 0.0547 | **0.0321** |
+| 600   | 30.48 | 21.72 | 0.9491 | 0.7684 | 0.0547 | 0.1343 |
+| 800   | 30.48 | 20.80 | 0.9491 | 0.7254 | 0.0547 | 0.1675 |
+| 1000  | 30.48 | 21.72 | 0.9491 | 0.7494 | 0.0547 | 0.1466 |
+| 2000  | 30.48 | 22.61 | 0.9491 | 0.7447 | 0.0547 | 0.1386 |
+
+**Key observations**: At early epochs (200–400), LIFT SR generalizes well to human faces — LPIPS is better than bicubic (0.03 vs 0.05), indicating the model learns generic super-resolution priors. However, beyond 400 epochs, the model overfits to animal face structure and OOD performance degrades sharply (LPIPS jumps to 0.13+). This contrasts with in-distribution AFHQ where performance improves monotonically through 2000 epochs. The sweet spot for OOD generalization is around 200–400 epochs of training.
+
 ## Visualizations
 
 ### Optimal Path Visualization (EMA 400 epochs)
