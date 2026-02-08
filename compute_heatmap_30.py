@@ -317,6 +317,84 @@ def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
     return path, total_cost
 
 
+def find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps=18, max_jump=5):
+    """
+    Find optimal path from (0,0) to (n-1,n-1) with exactly num_steps steps,
+    using Δλ (log-SNR distance) as the step size metric.
+
+    Cost per step = (e64_start + e64_end)/2 × |Δλ_64| + (e32_start + e32_end)/2 × |Δλ_32|
+
+    This weights each scale's error by its own log-SNR step size, which better
+    reflects the continuous integral in logSNR space.
+
+    Args:
+        error_64: [n, n] error values for 64×64 scale
+        error_32: [n, n] error values for 32×32 scale
+        log_snr: [n] log-SNR values for each grid point
+        num_steps: Number of steps (e.g., 18)
+        max_jump: Maximum jump per step in each direction (default 5)
+
+    Returns:
+        path: List of (i, j) tuples, length num_steps+1
+        total_cost: Total integrated error along path
+    """
+    e64 = error_64.numpy() if torch.is_tensor(error_64) else error_64
+    e32 = error_32.numpy() if torch.is_tensor(error_32) else error_32
+    lsnr = log_snr.numpy() if torch.is_tensor(log_snr) else log_snr
+    n = e64.shape[0]
+
+    INF = float('inf')
+    dp = np.full((n, n, num_steps + 1), INF)
+    parent = np.full((n, n, num_steps + 1, 3), -1, dtype=int)
+
+    dp[0, 0, 0] = 0
+
+    for k in range(num_steps):
+        for i in range(n):
+            for j in range(n):
+                if dp[i, j, k] == INF:
+                    continue
+
+                remaining = num_steps - k - 1
+
+                for ni in range(i, min(i + max_jump + 1, n)):
+                    for nj in range(j, min(j + max_jump + 1, n)):
+                        if ni == i and nj == j:
+                            continue
+
+                        dist_to_end = (n - 1 - ni) + (n - 1 - nj)
+                        if dist_to_end > remaining * 2 * max_jump:
+                            continue
+                        if remaining == 0 and (ni != n - 1 or nj != n - 1):
+                            continue
+
+                        dl64 = abs(lsnr[ni] - lsnr[i])
+                        dl32 = abs(lsnr[nj] - lsnr[j])
+                        c64 = (e64[i, j] + e64[ni, nj]) / 2 * dl64
+                        c32 = (e32[i, j] + e32[ni, nj]) / 2 * dl32
+                        new_cost = dp[i, j, k] + c64 + c32
+
+                        if new_cost < dp[ni, nj, k + 1]:
+                            dp[ni, nj, k + 1] = new_cost
+                            parent[ni, nj, k + 1] = [i, j, k]
+
+    if dp[n - 1, n - 1, num_steps] == INF:
+        print(f"Warning: Cannot reach (n-1,n-1) in exactly {num_steps} steps with max_jump={max_jump}")
+        print(f"Retrying with larger max_jump...")
+        return find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps, max_jump=max_jump + 2)
+
+    path = []
+    i, j, k = n - 1, n - 1, num_steps
+    while k >= 0:
+        path.append((i, j))
+        if k == 0:
+            break
+        pi, pj, pk = parent[i, j, k]
+        i, j, k = pi, pj, pk
+
+    return path[::-1], dp[n - 1, n - 1, num_steps]
+
+
 def allocate_steps(path, error_matrix, num_steps):
     """
     Allocate N sampling points along path based on error distribution.

@@ -1,0 +1,288 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\newcommand{\snr}{\mathrm{SNR}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\beps}{\boldsymbol{\epsilon}}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\Frob}[1]{\left\|#1\right\|_F}
+
+\title{Chain-Rule Factor for Discretization Error\\in Dual-Scale Diffusion Path Optimization}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+We train a dual-scale diffusion model with $\beps$-prediction using the DDPM forward process:
+\begin{equation}\label{eq:forward}
+    \bx_t = \sqrt{\bar\alpha_t}\,\bx_0 + \sqrt{1-\bar\alpha_t}\,\beps, \qquad \beps \sim \mathcal{N}(0, I),
+\end{equation}
+where $\bar\alpha_t = \prod_{s=1}^t (1-\beta_s)$. The signal-to-noise ratio and log-SNR are:
+\begin{equation}
+    \snr_t = \frac{\bar\alpha_t}{1-\bar\alpha_t}, \qquad \lambda_t = \log \snr_t.
+\end{equation}
+
+Deterministic DDIM sampling solves the probability flow ODE. Using $\lambda = \log\snr$ as the time variable, a single DDIM step from $(\bx_t, t)$ to $(\bx_{t'}, t')$ is:
+\begin{align}
+    \hat\bx_0 &= \frac{\bx_t - \sqrt{1-\bar\alpha_t}\,\beps_\theta(\bx_t, t)}{\sqrt{\bar\alpha_t}}, \\
+    \bx_{t'} &= \sqrt{\bar\alpha_{t'}}\,\hat\bx_0 + \sqrt{1-\bar\alpha_{t'}}\,\beps_\theta(\bx_t, t).
+\end{align}
+The local truncation error arises from using $\beps_\theta(\bx_t, t)$ in place of $\beps_\theta(\bx_{t'}, t')$.
+
+\section{What \texttt{get\_vHv} Computes}
+
+Our Hutchinson estimator computes the squared Frobenius norm of the Jacobian $J = \partial\beps_\theta / \partial\bx_t$. Concretely, with spatial normalization $v = 1/(HW)$:
+\begin{align}
+    \mathbf{u} &= \beps \cdot \sqrt{v}, \qquad \beps \in \{-1,+1\}^d \text{ (Rademacher)}, \\
+    \texttt{get\_vHv} &= \E_\beps\!\left[\sum_{\text{output}} (J\mathbf{u})^2\right] \cdot v \;=\; \frac{\Frob{J}^2}{(HW)^2} \;=\; \frac{\Tr(J^\top J)}{(HW)^2}.
+\end{align}
+This gives us $\Frob{\partial\beps_\theta/\partial\bx_t}^2$ (normalized), measuring how sensitive the noise prediction is to input perturbations.
+
+\section{Rigorous Derivation of the Discretization Error}
+
+\subsection{Step 1: ODE truncation error in $\bx_t$-space}
+
+The DDIM ODE's local truncation error over a step $\Delta\lambda$ in log-SNR space is (to leading order):
+\begin{equation}\label{eq:error_xt}
+    \text{LTE}_{\bx_t} \;\propto\; \Frob{J_{\bx_t}}^2 \cdot \left\|\frac{d\bx_t}{d\lambda}\right\|^2 \cdot (\Delta\lambda)^2.
+\end{equation}
+The first factor is what \texttt{get\_vHv} estimates. The second is the chain-rule factor converting from $\bx_t$-space to $\lambda$-space. The third is the step size.
+
+\subsection{Step 2: Deriving $\|d\bx_t/d\lambda\|^2$}
+
+Using $\bar\alpha = \sigma(\lambda)$ and $1-\bar\alpha = \sigma(-\lambda)$ where $\sigma$ is the sigmoid:
+\begin{align}
+    \frac{d\sqrt{\bar\alpha}}{d\lambda} &= \frac{\sqrt{\bar\alpha}\,(1-\bar\alpha)}{2}, &
+    \frac{d\sqrt{1-\bar\alpha}}{d\lambda} &= -\frac{\bar\alpha\sqrt{1-\bar\alpha}}{2}.
+\end{align}
+Therefore:
+\begin{equation}
+    \frac{d\bx_t}{d\lambda} = \frac{\sqrt{\bar\alpha}\,(1-\bar\alpha)}{2}\,\bx_0 - \frac{\bar\alpha\sqrt{1-\bar\alpha}}{2}\,\beps.
+\end{equation}
+Taking the expected squared norm (with $\E[\|\bx_0\|^2] = d$, $\E[\|\beps\|^2] = d$, $\bx_0 \perp \beps$):
+\begin{align}
+    \frac{1}{d}\,\E\!\left[\left\|\frac{d\bx_t}{d\lambda}\right\|^2\right]
+    &= \frac{\bar\alpha(1-\bar\alpha)^2}{4} + \frac{\bar\alpha^2(1-\bar\alpha)}{4}
+    = \frac{\bar\alpha(1-\bar\alpha)}{4}
+    = \frac{\snr}{4(1+\snr)^2}. \label{eq:dx_dlambda}
+\end{align}
+
+
+\subsection{Step 3: Converting to $\hat\bx_0$-space (what we actually care about)}
+
+Eq.~\eqref{eq:error_xt} measures error in $\bx_t$-space, but we care about sample quality, i.e., error in $\hat\bx_0$-space. The DDIM formula gives:
+\begin{equation}
+    \hat\bx_0 = \frac{\bx_t - \sqrt{1-\bar\alpha}\,\beps_\theta}{\sqrt{\bar\alpha}}.
+\end{equation}
+A perturbation $\delta\beps_\theta$ in the noise prediction propagates to $\hat\bx_0$ as:
+\begin{equation}\label{eq:eps_to_x0}
+    \delta\hat\bx_0 = -\frac{\sqrt{1-\bar\alpha}}{\sqrt{\bar\alpha}}\,\delta\beps_\theta
+    = -\frac{1}{\sqrt{\snr}}\,\delta\beps_\theta
+    \qquad\Longrightarrow\qquad
+    \|\delta\hat\bx_0\|^2 = \frac{1}{\snr}\|\delta\beps_\theta\|^2.
+\end{equation}
+This is an \textbf{exact} relationship, not a heuristic.
+
+\subsection{Step 4: Full error in $\hat\bx_0$-space (rigorous result)}
+
+The change in $\beps_\theta$ over one ODE step of size $\Delta\lambda$ is:
+\begin{equation}
+    \Delta\beps_\theta \approx J_{\bx_t} \cdot \frac{d\bx_t}{d\lambda} \cdot \Delta\lambda + \frac{\partial\beps_\theta}{\partial\lambda}\Delta\lambda.
+\end{equation}
+Dropping the explicit time derivative (which does not involve the Jacobian and is not captured by \texttt{get\_vHv}), the squared error in $\hat\bx_0$-space is:
+\begin{align}
+    \|\delta\hat\bx_0\|^2
+    &\propto \frac{1}{\snr} \cdot \Frob{J_{\bx_t}}^2 \cdot \left\|\frac{d\bx_t}{d\lambda}\right\|^2 \cdot (\Delta\lambda)^2 \notag\\
+    &= \Frob{J_{\bx_t}}^2 \cdot \frac{1}{\snr} \cdot \frac{\snr}{4(1+\snr)^2} \cdot (\Delta\lambda)^2 \notag\\
+    &= \Frob{J_{\bx_t}}^2 \cdot \frac{1}{4(1+\snr)^2} \cdot (\Delta\lambda)^2. \label{eq:error_x0}
+\end{align}
+
+This gives us the \textbf{rigorously derived} chain-rule factor:
+\begin{equation}
+    \boxed{\gamma_{\text{rigorous}} = \frac{1}{4(1+\snr)^2}}
+\end{equation}
+
+Note how the $\snr$ from $\|d\bx_t/d\lambda\|^2$ and the $1/\snr$ from the $\beps\to\hat\bx_0$ conversion cancel exactly.
+
+
+\section{Summary of All Candidate Factors}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+Factor & Formula & Derivation & Status \\
+\midrule
+$\gamma_A$ & $\dfrac{1}{1+\snr}$ & Chain rule $\bx_t \to \bz$, $\bz = \sqrt{\snr}\,\bx_0 + \beps$ & Rigorous \\[8pt]
+$\gamma_B$ & $\dfrac{1}{\snr(1+\snr)}$ & Chain rule $\bx_t \to \bz$, $\bz = \snr\,\bx_0 + \sqrt{\snr}\,\beps$ & Rigorous \\[8pt]
+$\gamma_C$ & $\dfrac{\snr}{4(1+\snr)^2}$ & $\|d\bx_t/d\lambda\|^2$ (ODE chain rule in $\bx_t$-space) & Rigorous \\[8pt]
+$\gamma_D$ & $\dfrac{1}{4(1+\snr)^2}$ & Full: $\|d\bx_t/d\lambda\|^2 \cdot (1/\snr)$ (ODE in $\hat\bx_0$-space) & \textbf{Rigorous} \\
+\bottomrule
+\end{tabular}
+\caption{All candidate chain-rule factors. Each is mathematically rigorous for its respective error metric.}
+\end{table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+& \multicolumn{6}{c}{$\snr$} \\
+\cmidrule(l){2-7}
+Factor & 0.001 & 0.1 & 1 & 10 & 100 & 10000 \\
+\midrule
+$\gamma_A$ & 1.00 & 0.91 & 0.50 & 0.091 & $9.9 \times 10^{-3}$ & $10^{-4}$ \\
+$\gamma_B$ & 1000 & 9.1 & 0.50 & $9.1 \times 10^{-3}$ & $9.9 \times 10^{-5}$ & $10^{-8}$ \\
+$\gamma_C$ & $2.5 \times 10^{-4}$ & 0.021 & 0.063 & 0.021 & $2.5 \times 10^{-3}$ & $2.5 \times 10^{-5}$ \\
+$\gamma_D$ & 0.25 & 0.083 & 0.063 & $2.1 \times 10^{-3}$ & $2.5 \times 10^{-5}$ & $2.5 \times 10^{-9}$ \\
+\bottomrule
+\end{tabular}
+\caption{Numerical values of the four factors.}
+\end{table}
+
+\subsection{Relationships}
+\begin{align}
+    \gamma_B &= \gamma_A \cdot \frac{1}{\snr}, \\
+    \gamma_D &= \gamma_C \cdot \frac{1}{\snr} = \gamma_A \cdot \frac{1}{4(1+\snr)}.
+\end{align}
+The pattern: going from $\bx_t$-space error to $\hat\bx_0$-space error always multiplies by $1/\snr$ (Eq.~\ref{eq:eps_to_x0}).
+
+
+\section{Why $\gamma_B$ Works Best Empirically (Honest Assessment)}
+
+\subsection{The problem with $\gamma_D$}
+
+$\gamma_D = 1/(4(1+\snr)^2)$ is the rigorously correct factor for $\hat\bx_0$-space error per unit $\Delta\lambda$. However, it produces \textbf{degenerate L-shaped DP paths} that first denoise one scale completely, then the other. This happens because $\gamma_D$ decays as $1/\snr^2$ at high SNR, making the error landscape nearly flat in the low-noise region. The DP algorithm then ``doesn't care'' how it traverses low-noise timesteps, leading to unbalanced paths.
+
+\subsection{The grid-spacing hypothesis (partially refuted)}
+
+One might hypothesize that $\gamma_D$ fails because our DP grid is uniform in $t$ (timestep) but non-uniform in $\lambda$ (log-SNR). For our cosine schedule, $\Delta\lambda$ per grid step ranges from $\sim 0.2$ (mid-noise) to $\sim 3.9$ (low-noise), so the grid implicitly oversamples mid-noise and undersamples endpoints.
+
+However, \textbf{this explanation is insufficient}. We tested $\gamma_D$ on a $\lambda$-uniform grid (30 points equally spaced in log-SNR), where the grid-spacing argument should not apply. The result: $\gamma_D$ \emph{still} produces L-shaped paths, while $\gamma_B$ produces balanced paths even on the $\lambda$-uniform grid.
+
+This means the grid non-uniformity is \textbf{not the primary reason} $\gamma_D$ fails. The issue is more fundamental: $\gamma_D$'s rapid decay ($\sim 1/\snr^2$) makes the low-noise region contribute negligibly to the total cost, regardless of grid spacing.
+
+\subsection{Why $\gamma_B$ works (empirical, not derived)}
+
+$\gamma_B = 1/(\snr(1+\snr))$ spans 11 orders of magnitude across the SNR range, with strong emphasis on high-noise regions. Its slower decay ($\sim 1/\snr^2$ vs.\ $\gamma_D$'s $\sim 1/\snr^2$---but with a much larger prefactor at intermediate SNR) maintains a non-trivial error landscape across the full noise range, forcing the DP to produce balanced paths.
+
+We can decompose $\gamma_B$ as:
+\begin{equation}
+    \gamma_B = \underbrace{\frac{1}{1+\snr}}_{\text{chain rule } \bx_t \to \bz} \times \underbrace{\frac{1}{\snr}}_{\beps \to \hat\bx_0 \text{ amplification}},
+\end{equation}
+but this factorization is a \textbf{convenient post-hoc interpretation}, not a first-principles derivation. The $1/(1+\snr)$ factor corresponds to the Jacobian of the $\bx_t \to \bz$ reparameterization, and the $1/\snr$ factor corresponds to the $\beps \to \hat\bx_0$ noise amplification. But there is no rigorous argument for why these two factors should multiply the Hutchinson trace estimate in this particular way.
+
+\subsection{Formal relationship}
+
+We can express $\gamma_B$ in terms of $\gamma_D$:
+\begin{equation}
+    \gamma_B = \gamma_D \cdot \frac{4(1+\snr)}{\snr}.
+\end{equation}
+The ``correction'' factor $4(1+\snr)/\snr$ boosts high-noise regions relative to low-noise regions. But we cannot rigorously justify this correction from first principles---it is an empirical observation that this particular weighting produces good DP paths.
+
+\section{Cross-Scale Jacobian Analysis}
+
+Beyond the self-Jacobians $J_{HH} = \partial f_H/\partial \bx_H$ and $J_{LL} = \partial f_L/\partial \bx_L$, we also measure the cross-scale Jacobians:
+\begin{align}
+    J_{HL} &= \frac{\partial f_H}{\partial \bx_L} \quad \text{(how 64$\times$64 output depends on 32$\times$32 input)}, \\
+    J_{LH} &= \frac{\partial f_L}{\partial \bx_H} \quad \text{(how 32$\times$32 output depends on 64$\times$64 input)}.
+\end{align}
+
+\subsection{Cross-scale coupling is weak}
+
+Table~\ref{tab:cross_ratio} shows the mean ratio of cross-Jacobians to self-Jacobians across epochs. The cross-scale coupling is consistently $< 0.6\%$ of the self-scale signal.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Epoch & $J_{HL}/J_{HH}$ & $J_{LH}/J_{LL}$ & Cross fraction \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Non-EMA}} \\
+200 & 0.0060 & 0.0004 & 0.0015 \\
+400 & 0.0032 & 0.0004 & 0.0009 \\
+600 & 0.0028 & 0.0003 & 0.0008 \\
+1000 & 0.0018 & 0.0003 & 0.0006 \\
+1200 & 0.0019 & 0.0003 & 0.0006 \\
+1400 & 0.0018 & 0.0002 & 0.0005 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{EMA}} \\
+200 & 0.0036 & 0.0003 & 0.0009 \\
+400 & 0.0019 & 0.0002 & 0.0005 \\
+600 & 0.0014 & 0.0002 & 0.0004 \\
+\bottomrule
+\end{tabular}
+\caption{Cross-scale Jacobian ratios. $J_{HL}/J_{HH}$ is consistently larger than $J_{LH}/J_{LL}$, suggesting the 64$\times$64 output is more sensitive to 32$\times$32 input than vice versa. Both decrease with training.}
+\label{tab:cross_ratio}
+\end{table}
+
+\subsection{Cross-weighted DP paths}
+
+We define weighted cost functions that incorporate cross-scale Jacobians:
+\begin{equation}
+    \text{cost}_w = (J_{HH} + J_{LL}) + w \cdot (J_{HL} + J_{LH}),
+\end{equation}
+where $w=0$ recovers the standard \texttt{dp\_total}, $w=1$ gives \texttt{dp\_w1}, and $w=100$ gives \texttt{dp\_w100}.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Epoch & dp\_total & dp\_w1 & dp\_w100 & $\Delta$(w100) \\
+\midrule
+\multicolumn{5}{@{}l}{\textit{Non-EMA (15803 images)}} \\
+200 & 80.54 & 80.54 & 78.20 & $-2.34$ \\
+400 & 38.99 & 38.99 & 37.40 & $-1.59$ \\
+1000 & 63.31 & 63.31 & 59.42 & $-3.89$ \\
+1200 & 39.86 & 39.86 & 39.26 & $-0.60$ \\
+\midrule
+\multicolumn{5}{@{}l}{\textit{EMA (15803 images)}} \\
+200 & 37.48 & 37.48 & 37.26 & $-0.22$ \\
+400 & 29.46 & 29.46 & 29.39 & $-0.07$ \\
+\bottomrule
+\end{tabular}
+\caption{FID scores for cross-weighted DP paths. dp\_w1 is identical to dp\_total in all cases (cross-Jacobian too small at $w=1$ to change the DP path). dp\_w100 consistently improves FID, with larger gains for non-EMA models and higher-FID epochs. Remaining epochs still running.}
+\label{tab:cross_dp_fid}
+\end{table}
+
+\subsection{Key findings}
+
+\begin{enumerate}
+    \item \textbf{dp\_w1 $\equiv$ dp\_total}: At weight $w=1$, the cross-Jacobian contribution is $\sim 0.05\%$ of the total cost, insufficient to change the DP path.
+    \item \textbf{dp\_w100 consistently improves FID}: With $w=100$, the cross-scale signal becomes large enough to perturb the DP path, yielding FID improvements of $0.07$--$3.89$ points.
+    \item \textbf{Larger gains for weaker models}: The improvement from dp\_w100 is larger for non-EMA models (up to $-3.89$) than EMA models ($-0.07$ to $-0.22$), suggesting that cross-scale information is more valuable when the base model is weaker.
+    \item \textbf{$J_{HL} > J_{LH}$}: The 64$\times$64 output is $\sim 10\times$ more sensitive to 32$\times$32 input than vice versa, consistent with the low-res scale providing structural guidance for high-res denoising.
+\end{enumerate}
+
+\section{Conclusion}
+
+\begin{enumerate}
+    \item The \textbf{rigorously correct} chain-rule factor for $\hat\bx_0$-space error per unit $\Delta\lambda$ is $\gamma_D = 1/(4(1+\snr)^2)$.
+    \item $\gamma_D$ produces degenerate L-shaped DP paths. This is \textbf{not} primarily due to grid non-uniformity (tested on $\lambda$-uniform grid with same result), but because $\gamma_D$'s rapid decay makes the low-noise region negligible in the total cost.
+    \item The \textbf{empirically best} factor is $\gamma_B = 1/(\snr(1+\snr))$, which produces balanced paths and good FID scores. However, we do not have a rigorous first-principles derivation for why $\gamma_B$ is the right choice.
+    \item $\gamma_B$ admits a clean decomposition $\gamma_B = [1/(1+\snr)] \times [1/\snr]$, but this is a post-hoc interpretation.
+    \item \textbf{Open question}: Is there a principled error metric (different from $\hat\bx_0$-space error) for which $\gamma_B$ is the rigorously correct factor? Or is the success of $\gamma_B$ fundamentally an empirical observation about what error weighting produces good DP paths for sample quality?
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\bibitem{kingma2021variational}
+D.~P. Kingma, T.~Salimans, B.~Poole, and J.~Ho.
+\newblock Variational diffusion models.
+\newblock \emph{NeurIPS}, 2021.
+
+\bibitem{sabour2024ays}
+A.~Sabour, S.~Fidler, and K.~Kreis.
+\newblock Align your steps: Optimizing sampling schedules in diffusion models.
+\newblock \emph{ICML}, 2024.
+\end{thebibliography}
+
+\end{document}

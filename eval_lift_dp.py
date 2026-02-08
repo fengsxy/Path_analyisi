@@ -30,7 +30,7 @@ from data import AFHQ64Dataset
 from compute_heatmap_30 import (
     compute_error_heatmap_30,
     find_optimal_path,
-    find_optimal_path_n_steps,
+    find_optimal_path_n_steps_lambda,
     path_to_timesteps,
     plot_comparison
 )
@@ -226,10 +226,13 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
         print(f"Computing optimal {num_steps}-step paths...", flush=True)
         t_grid = data['t_grid']
         error_64 = data['error_64']
+        error_32 = data['error_32']
         error_total = data['error_total']
+        log_snr = torch.log(data['snr_grid'])
 
-        samples_64, cost_64_n = find_optimal_path_n_steps(error_64, num_steps)
-        samples_total, cost_total_n = find_optimal_path_n_steps(error_total, num_steps)
+        zeros = torch.zeros_like(error_64)
+        samples_64, cost_64_n = find_optimal_path_n_steps_lambda(error_64, zeros, log_snr, num_steps)
+        samples_total, cost_total_n = find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps)
 
         ts_64_64, ts_64_32 = path_to_timesteps(samples_64, t_grid)
         ts_total_64, ts_total_32 = path_to_timesteps(samples_total, t_grid)
@@ -274,8 +277,9 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
 
     # Find optimal N-step paths
     print(f"Finding optimal {num_steps}-step paths...", flush=True)
-    samples_64, cost_64_n = find_optimal_path_n_steps(error_64, num_steps)
-    samples_total, cost_total_n = find_optimal_path_n_steps(error_total, num_steps)
+    log_snr = torch.log(snr_grid)
+    samples_64, cost_64_n = find_optimal_path_n_steps_lambda(error_64, torch.zeros_like(error_64), log_snr, num_steps)
+    samples_total, cost_total_n = find_optimal_path_n_steps_lambda(error_64, error_32, log_snr, num_steps)
 
     # Convert to timesteps
     ts_64_64, ts_64_32 = path_to_timesteps(samples_64, t_grid)

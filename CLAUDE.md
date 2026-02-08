@@ -173,8 +173,63 @@ With `max_jump=5` (~170 timesteps per step), the path is forced to be more gradu
 - Low SNR = high noise = high timestep (t≈999)
 - Heatmap index 0 → t=999 (high noise), index 99 → t=0 (low noise)
 
-### Chain-Rule Factor
-When computing discretization error in SNR space:
+### Chain-Rule Factor — Derivation
+
+We want to measure DDIM discretization error in logSNR (λ) space, but the model operates in x_t space.
+
+**DDIM forward process:**
+```
+x_t = √ᾱ · x₀ + √(1-ᾱ) · ε,    SNR = ᾱ/(1-ᾱ),    λ = log(SNR)
+```
+
+**What `get_vHv` computes:**
+```python
+v = 1/(H*W)                          # spatial normalization
+u = Rademacher · √v                  # scaled random vector
+Ju = jvp(ε_θ, x_t, u)               # Jacobian-vector product
+get_vHv = E[(Ju)²] · v ≈ ||∂ε_θ/∂x_t||²_F / (H·W)²
+```
+This gives us `||J_{x_t}||²_F` (normalized), the Frobenius norm of the ε-prediction Jacobian.
+
+**Local truncation error of DDIM ODE:**
+```
+error ∝ ||J_{x_t}||² · ||dx_t/dλ||² · (Δλ)²
+```
+where `||dx_t/dλ||²` converts from x_t-space to λ-space.
+
+**Computing `||dx_t/dλ||²`:**
+```
+ᾱ = σ(λ),  1-ᾱ = σ(-λ)
+d√ᾱ/dλ = √ᾱ·(1-ᾱ)/2,    d√(1-ᾱ)/dλ = -ᾱ·√(1-ᾱ)/2
+
+E[||dx_t/dλ||²]/d = (d√ᾱ/dλ)² + (d√(1-ᾱ)/dλ)²
+                   = ᾱ(1-ᾱ)²/4 + ᾱ²(1-ᾱ)/4
+                   = ᾱ(1-ᾱ)/4
+                   = SNR / (4·(1+SNR)²)
+```
+
+**Three possible chain-rule factors and their z-space interpretations:**
+
+| Factor | Corresponding z-space | Behavior |
+|--------|----------------------|----------|
+| `1/(1+SNR)` | `z = √SNR·x₀ + ε` (standard) | Error flat across SNR → L-shaped DP path |
+| `SNR/(4·(1+SNR)²)` | True `||dx_t/dλ||²` | Peaks at SNR=1, decays both ends → L-shaped DP path |
+| `1/(SNR·(1+SNR))` | `z = SNR·x₀ + √SNR·ε` (stochastic localization) | High-noise dominant → reasonable DP path ✓ |
+
+**Why `1/(SNR·(1+SNR))` works best empirically:**
+
+The factor `1/(SNR·(1+SNR))` = `1/(1+SNR)` · `1/SNR`. The extra `1/SNR` acts as an
+importance weight that emphasizes high-noise regions (low SNR), which is consistent with:
+1. AYS finding that high-noise regions need denser sampling steps
+2. ε-prediction loss weighting: the SNR-weighted loss `L = E[SNR · ||ε - ε_θ||²]` implies
+   that per-unit-SNR error scales as `1/SNR`
+3. Empirically produces DP paths that yield good FID scores
+
+The mathematically "correct" factor `SNR/(4·(1+SNR)²)` produces degenerate L-shaped paths
+because it makes the error landscape too flat, removing the signal that DP needs to
+distinguish good paths from bad ones.
+
+**Current implementation (kept as-is):**
 ```python
 def chain_rule_factor(snr):
     return 1.0 / (snr * (1.0 + snr))
@@ -213,6 +268,16 @@ def chain_rule_factor(snr):
 - **Max jump per step**: 5 (≈170 timesteps)
 - **Checkpoints**: 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000 epochs
 - **FID evaluation**: 15803 images (full AFHQ training set for stable FID)
+- **Seed**: 42 (default)
+
+### IMPORTANT: Experiment Consistency Rule
+
+**All FID evaluation experiments MUST use identical settings to be comparable.** FID is highly sensitive to sample count — using 10000 vs 15803 images can shift FID by 15+ points. When running new experiments:
+
+1. **Always use `--num_images 15803`** (the full AFHQ training set) for final FID numbers
+2. **Only use reduced counts (e.g., 1000) for smoke tests**, and never report those as final results
+3. **Keep all other settings consistent**: seed=42, num_steps=18, batch_size=64, eta=0.0
+4. **When comparing across scripts** (e.g., `eval_lift_dp.py` vs `eval_cross_dp.py`), verify that generation logic, real features, and sample counts are identical before drawing conclusions
 
 ## EMA Evaluation
 
