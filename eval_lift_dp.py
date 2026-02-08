@@ -189,9 +189,34 @@ def load_real_features(num_images, device, cache_dir=None, cache_path='results/r
     return features
 
 
-def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_steps=18, cache_dir=None):
+def load_lift_model(checkpoint_path, device, use_ema=False):
+    """Load LIFT model from checkpoint, optionally using EMA weights."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    hidden_dims = checkpoint.get('hidden_dims', [64, 128, 256, 512])
+
+    model = LIFTDualTimestepModel(hidden_dims=hidden_dims)
+
+    if use_ema and 'ema_state' in checkpoint:
+        ema_shadow = checkpoint['ema_state']['shadow']
+        model_state = model.state_dict()
+        for name in ema_shadow:
+            if name in model_state:
+                model_state[name] = ema_shadow[name]
+        model.load_state_dict(model_state)
+        print(f"  Loaded EMA weights (decay={checkpoint['ema_state'].get('decay', '?')})", flush=True)
+    elif use_ema:
+        print(f"  WARNING: --ema specified but no ema_state in checkpoint, using model_state", flush=True)
+        model.load_state_dict(checkpoint['model_state'])
+    else:
+        model.load_state_dict(checkpoint['model_state'])
+
+    return model.to(device).eval()
+
+
+def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_steps=18,
+                            cache_dir=None, use_ema=False, heatmap_suffix=''):
     """Compute heatmap or load from cache, then compute optimal N-step paths."""
-    heatmap_path = os.path.join(output_dir, f'heatmap_30_{epoch}ep.pth')
+    heatmap_path = os.path.join(output_dir, f'heatmap_30{heatmap_suffix}_{epoch}ep.pth')
 
     if os.path.exists(heatmap_path):
         print(f"Loading cached heatmap: {heatmap_path}", flush=True)
@@ -227,12 +252,7 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
     print(f"Computing 30x30 heatmap...", flush=True)
 
     # Load model
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    hidden_dims = checkpoint.get('hidden_dims', [64, 128, 256, 512])
-
-    model = LIFTDualTimestepModel(hidden_dims=hidden_dims)
-    model.load_state_dict(checkpoint['model_state'])
-    model = model.to(device).eval()
+    model = load_lift_model(checkpoint_path, device, use_ema)
 
     # Scheduler
     scheduler = DDIMScheduler(num_train_timesteps=1000, beta_schedule="cosine", clip_sample=True)
@@ -289,7 +309,7 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
     print(f"Saved: {heatmap_path}", flush=True)
 
     # Plot
-    plot_path = os.path.join(output_dir, f'heatmap_30_{epoch}ep.png')
+    plot_path = os.path.join(output_dir, f'heatmap_30{heatmap_suffix}_{epoch}ep.png')
     plot_comparison(t_grid, error_64, error_total, path_64, path_total,
                     samples_64, samples_total, plot_path)
 
@@ -300,15 +320,10 @@ def compute_or_load_heatmap(checkpoint_path, epoch, device, output_dir, num_step
 
 
 def evaluate_dp_path(checkpoint_path, heatmap_data, path_type, feat_real, num_images,
-                     batch_size, device, output_dir, epoch, eta=0.0):
+                     batch_size, device, output_dir, epoch, eta=0.0, use_ema=False, grid_suffix=''):
     """Evaluate a DP path."""
     # Load model
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    hidden_dims = checkpoint.get('hidden_dims', [64, 128, 256, 512])
-
-    model = LIFTDualTimestepModel(hidden_dims=hidden_dims)
-    model.load_state_dict(checkpoint['model_state'])
-    model = model.to(device).eval()
+    model = load_lift_model(checkpoint_path, device, use_ema)
 
     # Scheduler
     scheduler = DDIMScheduler(num_train_timesteps=1000, beta_schedule="cosine", clip_sample=True)
@@ -344,7 +359,7 @@ def evaluate_dp_path(checkpoint_path, heatmap_data, path_type, feat_real, num_im
     del gen_images_list
 
     # Save grid
-    grid_path = os.path.join(output_dir, f'grid_lift_{path_type}_{epoch}ep.png')
+    grid_path = os.path.join(output_dir, f'grid_lift{grid_suffix}_{path_type}_{epoch}ep.png')
     save_grid(gen_images, grid_path, nrow=9)
     print(f"  Saved: {grid_path}", flush=True)
 
@@ -368,6 +383,8 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default='results')
     parser.add_argument('--cache_dir', type=str, default=None)
+    parser.add_argument('--force', action='store_true', help='Force re-evaluation even if results exist')
+    parser.add_argument('--ema', action='store_true', help='Use EMA weights from checkpoint')
     return parser.parse_args()
 
 
@@ -379,6 +396,7 @@ def main():
     print(f"Epochs: {args.epochs}", flush=True)
     print(f"Images: {args.num_images}", flush=True)
     print(f"Steps: {args.num_steps}", flush=True)
+    print(f"EMA: {args.ema}", flush=True)
     print("", flush=True)
 
     torch.manual_seed(args.seed)
@@ -398,21 +416,26 @@ def main():
     print("\n[Step 2] Evaluating checkpoints...", flush=True)
     results = []
 
+    ema_suffix = '_ema' if args.ema else ''
+
     for epoch in args.epochs:
         print(f"\n{'='*50}", flush=True)
         print(f"Epoch {epoch}", flush=True)
         print(f"{'='*50}", flush=True)
 
-        ckpt_path = f'checkpoints/lift_dual_timestep_{epoch}ep.pth'
-        grid_dp64_path = os.path.join(args.output_dir, f'grid_lift_dp_64_{epoch}ep.png')
-        grid_dp_total_path = os.path.join(args.output_dir, f'grid_lift_dp_total_{epoch}ep.png')
+        if args.ema:
+            ckpt_path = f'checkpoints/lift_ema_{epoch}ep.pth'
+        else:
+            ckpt_path = f'checkpoints/lift_dual_timestep_{epoch}ep.pth'
+        grid_dp64_path = os.path.join(args.output_dir, f'grid_lift{ema_suffix}_dp_64_{epoch}ep.png')
+        grid_dp_total_path = os.path.join(args.output_dir, f'grid_lift{ema_suffix}_dp_total_{epoch}ep.png')
 
         if not os.path.exists(ckpt_path):
             print(f"[Skip] Checkpoint not found: {ckpt_path}", flush=True)
             continue
 
         # Check if already evaluated (both grid files exist)
-        if os.path.exists(grid_dp64_path) and os.path.exists(grid_dp_total_path):
+        if os.path.exists(grid_dp64_path) and os.path.exists(grid_dp_total_path) and not args.force:
             print(f"[Skip] Already evaluated: {epoch}ep", flush=True)
             continue
 
@@ -422,7 +445,8 @@ def main():
 
         heatmap_data = compute_or_load_heatmap(
             ckpt_path, epoch, device, args.output_dir,
-            num_steps=args.num_steps, cache_dir=args.cache_dir
+            num_steps=args.num_steps, cache_dir=args.cache_dir,
+            use_ema=args.ema, heatmap_suffix=ema_suffix
         )
 
         # Evaluate DP-64
@@ -431,7 +455,8 @@ def main():
 
         fid_dp64 = evaluate_dp_path(
             ckpt_path, heatmap_data, 'dp_64', feat_real,
-            args.num_images, args.batch_size, device, args.output_dir, epoch, args.eta
+            args.num_images, args.batch_size, device, args.output_dir, epoch, args.eta,
+            use_ema=args.ema, grid_suffix=ema_suffix
         )
         print(f"  FID (DP-64): {fid_dp64:.2f}", flush=True)
 
@@ -441,14 +466,15 @@ def main():
 
         fid_dp_total = evaluate_dp_path(
             ckpt_path, heatmap_data, 'dp_total', feat_real,
-            args.num_images, args.batch_size, device, args.output_dir, epoch, args.eta
+            args.num_images, args.batch_size, device, args.output_dir, epoch, args.eta,
+            use_ema=args.ema, grid_suffix=ema_suffix
         )
         print(f"  FID (DP-Total): {fid_dp_total:.2f}", flush=True)
 
         results.append((epoch, fid_dp64, fid_dp_total, heatmap_data['cost_64'], heatmap_data['cost_total']))
 
     # Save results
-    csv_path = os.path.join(args.output_dir, 'fid_lift_dp_results.csv')
+    csv_path = os.path.join(args.output_dir, f'fid_lift{ema_suffix}_dp_results.csv')
     with open(csv_path, 'w') as f:
         f.write("Epoch,FID_DP64,FID_DP_Total,Cost_64,Cost_Total\n")
         for epoch, fid64, fid_total, cost64, cost_total in results:

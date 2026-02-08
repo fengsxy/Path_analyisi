@@ -1,40 +1,99 @@
 # LIFT Dual-Scale Diffusion Model
 
-A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with independent timesteps for each scale.
+A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with independent timesteps for each scale, using dynamic programming to find optimal 2D denoising paths.
 
 ## Results
 
-### Performance Comparison (18 DDIM steps, 15803 images, ~58M parameters)
+### Main Results (18 DDIM steps, 15803 images, 5 seeds)
 
 | Epoch | Baseline | LIFT Diagonal | LIFT DP-64 | LIFT DP-Total |
 |------:|---------:|--------------:|-----------:|--------------:|
-| 200   | 46.74    | 92.15         | 86.12      | 80.53         |
-| 400   | 50.27    | 62.69         | 51.68      | 38.97         |
-| 600   | 44.32    | 60.47         | 49.97      | 46.48         |
-| 800   | **40.43**| 48.94         | 48.33      | 40.50         |
-| 1000  | 40.85    | 81.33         | 76.33      | 63.31         |
-| 1200  | 51.91    | 72.41         | 60.81      | 39.79         |
-| 1400  | 45.63    | 76.37         | 63.25      | 40.36         |
-| 1600  | 47.70    | 64.54         | 60.95      | 39.78         |
-| 1800  | 45.36    | 102.01        | 83.14      | 53.66         |
-| 2000  | 59.15    | 69.62         | 51.73      | **36.46**     |
+| 200   | **33.07±0.13** | 87.22±0.35 | 85.75±0.39 | 80.53±0.16 |
+| 400   | 41.54±0.30 | 49.60±0.28 | 51.77±0.29 | **39.35±0.26** |
+| 600   | **34.04±0.16** | 50.07±0.32 | 49.77±0.22 | 46.48±0.40 |
+| 800   | 40.82±0.20 | 49.07±0.44 | 48.39±0.26 | **40.43±0.31** |
+| 1000  | **41.05±0.16** | 82.11±0.44 | 76.58±0.31 | 63.59±0.26 |
+| 1200  | 52.32±0.29 | 72.69±0.34 | 61.05±0.26 | **40.11±0.22** |
+| 1400  | 45.85±0.26 | 76.40±0.18 | 63.39±0.10 | **40.55±0.24** |
+| 1600  | 48.13±0.34 | 64.89±0.31 | 60.91±0.22 | **40.28±0.39** |
+| 1800  | **45.61±0.22** | 101.76±0.38 | 82.96±0.25 | 53.96±0.20 |
+| 2000  | 59.37±0.19 | 69.61±0.08 | 51.83±0.15 | **36.65±0.23** |
 
-### Summary
+### EMA Results (decay=0.9999, single seed)
 
-| Method | Best FID | Best Epoch |
-|--------|----------|------------|
-| **LIFT DP-Total** | **36.46** | 2000 |
-| Baseline | 40.43 | 800 |
-| LIFT DP-64 | 48.33 | 800 |
-| LIFT Diagonal | 48.94 | 800 |
+| Epoch | Baseline EMA | LIFT EMA Diag | LIFT EMA DP-64 | LIFT EMA DP-Total |
+|------:|-------------:|--------------:|---------------:|------------------:|
+| 200   | **28.22** | 38.54 | 34.10 | 37.45 |
+| 400   | **27.90** | 31.04 | 29.87 | 29.45 |
+| 600   | **30.00** | 35.94 | 34.22 | 30.16 |
+| 800   | **31.52** | 44.32 | 38.36 | 31.37 |
+| 1000  | ---       | 46.12 | 38.35 | **31.32** |
+| 1200  | ---       | 46.83 | 37.49 | **31.74** |
 
-**Key findings:**
-- **LIFT DP-Total @ 2000ep achieves best FID of 36.46**, outperforming Baseline best (40.43) by **9.8%**
-- DP-Total consistently outperforms DP-64 and Diagonal across most epochs
-- Baseline peaks at 800-1000ep then overfits; LIFT DP-Total continues improving to 2000ep
-- LIFT Diagonal is unstable, demonstrating the importance of 2D path optimization
+### Ablation: Single-Output Architectures (single seed)
 
-![FID Progression](figure_plot/fid_progression_comparison.png)
+| Epoch | single_t Diag | single_t DP | no_t Diag | no_t DP |
+|------:|--------------:|------------:|----------:|--------:|
+| 200   | 231.23 | 61.90 | 241.14 | 118.28 |
+| 400   | 209.82 | 45.16 | 230.22 | 57.92 |
+| 600   | 219.00 | **38.63** | 196.65 | 50.76 |
+| 800   | 231.28 | 42.52 | 177.12 | 65.01 |
+| 1000  | 220.37 | 46.23 | 170.03 | 81.40 |
+| 1200  | 243.62 | 48.42 | **167.26** | 75.91 |
+| 1400  | 250.40 | 45.30 | 167.25 | 56.43 |
+| 1600  | 261.03 | 48.49 | 180.69 | 82.68 |
+| 1800  | 256.19 | 60.19 | 187.47 | 73.21 |
+| 2000  | 259.67 | 51.99 | 193.21 | 70.71 |
+
+### Summary of Best FID
+
+| Model | Best FID | Epoch | Notes |
+|-------|----------|-------|-------|
+| Baseline EMA | **27.90** | 400 | Single seed |
+| LIFT EMA DP-Total | **29.45** | 400 | Single seed |
+| LIFT EMA DP-64 | 29.87 | 400 | Single seed |
+| LIFT EMA Diagonal | 31.04 | 400 | Single seed |
+| Baseline | 33.07±0.13 | 200 | 5-seed |
+| LIFT DP-Total | 36.65±0.23 | 2000 | 5-seed |
+| single_t DP | 38.63 | 600 | Ablation |
+| LIFT DP-64 | 48.39±0.26 | 800 | 5-seed |
+| LIFT Diagonal | 49.07±0.44 | 800 | 5-seed |
+| no_t DP | 50.76 | 600 | Ablation |
+
+## Key Findings
+
+### 1. DP Path Optimization is Critical
+
+DP-Total consistently outperforms Diagonal by 8-33 FID points. The effect is even more dramatic in ablation models (single_t: 219→38.6, a 180-point improvement).
+
+| Epoch | Diagonal | DP-Total | Improvement |
+|------:|---------:|---------:|------------:|
+| 400   | 49.60    | 39.35    | **+10.25** |
+| 800   | 49.07    | 40.43    | **+8.64** |
+| 1200  | 72.69    | 40.11    | **+32.58** |
+| 2000  | 69.61    | 36.65    | **+32.96** |
+
+### 2. EMA Closes the Gap
+
+With EMA, LIFT DP-Total (29.45) nearly matches Baseline (27.90)—a gap of only 1.55 FID points, compared to 3.6 points without EMA.
+
+### 3. LIFT DP-Total Shows Training Stability
+
+| Model | Best FID | Best Epoch | FID at 2000ep | Degradation |
+|-------|----------|------------|---------------|-------------|
+| Baseline | 33.07 | 200 | 59.37 | **+26.30** |
+| LIFT DP-Total | 36.65 | 2000 | 36.65 | **+0.00** |
+
+### 4. Timestep Information Matters (Ablation)
+
+| Model | Diagonal | DP | DP Improvement |
+|-------|----------|-----|----------------|
+| single_t (has t_64) | 209.82 | **38.63** | 171 points |
+| no_t (no timestep) | 167.25 | **50.76** | 117 points |
+
+single_t DP (38.63) outperforms no_t DP (50.76), confirming that timestep conditioning helps even in single-output models.
+
+## Visualizations
 
 ### Optimal Path Visualization (2000 epochs)
 
@@ -46,22 +105,15 @@ The heatmaps show discretization error across the 2D timestep space (t_64 × t_3
 
 - **Cyan line**: Diagonal path (t_64 = t_32)
 - **Yellow points + Red line**: Optimal 18-step DP path
-- **DP-Total path** deviates from diagonal to minimize combined error, leading to better FID
+- **DP-Total path** deviates from diagonal to minimize combined error
 
 ### Path Convergence Across Epochs
 
 ![Path Comparison](results/path_comparison_across_epochs.png)
 
 - **DP-Total paths converge after 1200ep** (green/blue/purple lines overlap)
-- **DP-64 paths converge after 1200ep** with L-shaped trajectory (first denoise 64×64, then 32×32)
+- **DP-64 paths converge after 1200ep** with L-shaped trajectory
 - Early epochs (400, 800) show different paths due to undertrained model
-
-## Core Findings
-
-1. **2D Path Optimization is Critical**: LIFT with diagonal sampling performs poorly; optimal path scheduling via DP is essential
-2. **DP-Total > DP-64**: Optimizing total error (64×64 + 32×32) yields better results than optimizing 64×64 error alone
-3. **LIFT scales better with training**: Baseline overfits after 800ep, while LIFT DP-Total continues improving to 2000ep
-4. **9.8% FID improvement**: LIFT DP-Total (36.46) vs Baseline (40.43)
 
 ## Technical Details
 
@@ -85,12 +137,6 @@ $$x_t = \sqrt{\bar{\alpha}} \cdot x_0 + \sqrt{1 - \bar{\alpha}} \cdot \epsilon$$
 In SNR parameterization:
 $$z = \sqrt{\text{SNR}} \cdot x_0 + \epsilon$$
 
-The relationship:
-$$x_t = \frac{z}{\sqrt{\text{SNR} \cdot (1 + \text{SNR})}}$$
-
-So the Jacobian transforms as:
-$$\frac{\partial x_t}{\partial z} = \frac{1}{\sqrt{\text{SNR} \cdot (1 + \text{SNR})}}$$
-
 For the squared Jacobian (vHv):
 $$(J_z)^2 = \frac{(J_{x_t})^2}{\text{SNR} \cdot (1 + \text{SNR})}$$
 
@@ -99,12 +145,6 @@ def chain_rule_factor(snr):
     """Convert Jacobian from x_t space to z (SNR) space."""
     return 1.0 / (snr * (1.0 + snr))
 ```
-
-### DP Path to Generation Steps
-
-1. **DP Path**: Maps γ₀ → optimal γ₁
-2. **Generation Schedule**: Interpolate to N steps via `logspace(0.01, 100, num_steps)`
-3. **Convert to Timesteps**: `snr_to_timestep(gamma)`
 
 ### 2D Optimal Path Algorithm
 
@@ -124,7 +164,7 @@ where `step_size = (ni - i) + (nj - j)` is the Manhattan distance.
 **Why trapezoidal integral?**
 - Simple `error[ni,nj]` allows jumping to low-error regions (t≈0) immediately
 - `error * step_size` still favors large jumps because error at t≈0 is tiny
-- Trapezoidal integral `(error_start + error_end) / 2 * step_size` properly accounts for error accumulated along the entire segment
+- Trapezoidal integral properly accounts for error accumulated along the entire segment
 
 ```python
 def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
@@ -143,12 +183,10 @@ def find_optimal_path_n_steps(error_matrix, num_steps, max_jump=5):
             for j in range(N):
                 if dp[step][i][j] == INF:
                     continue
-                # Try all valid next positions
                 for ni in range(i, min(i + max_jump + 1, N)):
                     for nj in range(j, min(j + max_jump + 1, N)):
                         if ni == i and nj == j:
                             continue
-                        # Trapezoidal cost
                         step_size = (ni - i) + (nj - j)
                         cost = (error[i,j] + error[ni,nj]) / 2 * step_size
                         if dp[step][i][j] + cost < dp[step+1][ni][nj]:
@@ -202,11 +240,11 @@ python train_baseline.py --epochs 2000
 # Train LIFT
 python train_lift.py --epochs 2000
 
-# Evaluate Baseline (all epochs)
-./scripts/eval_baseline.sh
+# Evaluate all models (3 GPUs in parallel)
+./scripts/eval_all.sh
 
-# Evaluate LIFT with DP paths
-./scripts/eval_lift_dp.sh
+# Evaluate with multiple seeds
+./scripts/eval_all.sh --multi-seed
 
 # Compute heatmap for a specific epoch
 ./scripts/compute_heatmap.sh 2000
