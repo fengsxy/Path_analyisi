@@ -1,17 +1,16 @@
-"""Phase 2: Compute 3D error heatmap for SLOT model.
+"""Compute 2D error heatmap for 2-scale SLOT model.
 
-Computes Hutchinson-estimated discretization error at each (σ_orig, σ_2x, σ_4x)
-triplet on a coarse grid. Uses finite-difference JVP to avoid functorch
-incompatibility with the SongUNet's autograd.Function.
+Computes Hutchinson-estimated discretization error at each (σ_orig, σ_2x)
+pair on a G×G grid. Uses finite-difference JVP.
 
-The model has 3 scales (orig 32×32, 2x 16×16, 4x 8×8), each with 6 torus channels.
+The model has 2 scales (orig 32×32, 2x 16×16), each with 6 torus channels.
 """
 import argparse
 import io
 import math
 import os
-import sys
 import pickle
+import sys
 import zipfile
 
 import numpy as np
@@ -22,7 +21,7 @@ from tqdm import tqdm
 sys.path.insert(0, "/home/ylong030/slot")
 import dnnlib
 
-from generate_and_fid import convert_torus
+from generate_and_fid_2d import convert_torus_2d
 
 
 # ── Data loading ──────────────────────────────────────────────────────────
@@ -43,27 +42,23 @@ def load_cifar_images(num_images, seed=42):
     images = np.stack(images)
     t = torch.from_numpy(images).permute(0, 3, 1, 2).float() / 127.5 - 1.0
     return t
+def build_multiscale_torus_2d(images):
+    """Build 2-scale torus input from 32×32 RGB images.
 
-
-def build_multiscale_torus(images):
-    """Build 3-scale torus input from 32×32 RGB images.
-
-    Returns [B, 18, 32, 32]: 3 scales × 6 torus channels.
+    Returns [B, 12, 32, 32]: 2 scales × 6 torus channels.
     """
     B, C, H, W = images.shape
     x_orig = images
     x_2x_small = F.interpolate(images, scale_factor=0.5, mode='area')
     x_2x = F.interpolate(x_2x_small, size=(H, W), mode='nearest')
-    x_4x_small = F.interpolate(images, scale_factor=0.25, mode='area')
-    x_4x = F.interpolate(x_4x_small, size=(H, W), mode='nearest')
-    x_ms = torch.cat([x_orig, x_2x, x_4x], dim=1)
-    return convert_torus(x_ms)
+    x_ms = torch.cat([x_orig, x_2x], dim=1)
+    return convert_torus_2d(x_ms)
 
 
-def add_noise_edm(x_torus, sigma_vec):
-    """Add EDM-style noise: x_noisy = x + sigma * noise."""
+def add_noise_edm_2d(x_torus, sigma_vec):
+    """Add EDM-style noise: x_noisy = x + sigma * noise (2-scale)."""
     B, C, H, W = x_torus.shape
-    num_scales = 3
+    num_scales = 2
     cps = C // num_scales
     sv = sigma_vec.view(B, num_scales, 1, 1, 1).expand(B, num_scales, cps, H, W)
     sv = sv.reshape(B, C, H, W)
@@ -73,65 +68,44 @@ def add_noise_edm(x_torus, sigma_vec):
 
 # ── Hutchinson estimator (finite-difference) ─────────────────────────────
 
-def get_vHv_3scale_fd(f, z, K=4, eps=1e-3):
+def get_vHv_2scale_fd(f, z, K=4, eps=1e-3):
     """Compute vHv per scale using Hutchinson + finite differences.
 
-    Avoids functorch (jvp/vmap) which is incompatible with SongUNet's
-    autograd.Function. Uses central differences: Jv ≈ (f(z+εu) - f(z-εu)) / 2ε.
-
-    Returns [3] tensor: vHv for orig, 2x, 4x.
+    Returns [2] tensor: vHv for orig, 2x.
     """
     B, C, H, W = z.shape
-    num_scales = 3
+    num_scales = 2
     cps = C // num_scales  # 6
 
-    # Uniform variance normalized by spatial size
     v = 1.0 / (H * W)
     scale = math.sqrt(v)
 
-    per_scale_accum = torch.zeros(3, device=z.device)
+    per_scale_accum = torch.zeros(2, device=z.device)
 
     for _ in range(K):
-        # Rademacher random vector scaled by sqrt(v)
         u = torch.empty_like(z).bernoulli_(0.5).mul_(2).add_(-1) * scale
-
-        # Central finite difference: Jv ≈ (f(z+εu) - f(z-εu)) / (2ε)
         out_plus = f(z + eps * u)
         out_minus = f(z - eps * u)
         Ju = (out_plus - out_minus) / (2 * eps)
-
-        # (Ju)² * v, summed per scale
-        Ju_sq = Ju ** 2 * v  # [B, C, H, W]
+        Ju_sq = Ju ** 2 * v
         Ju_sq_view = Ju_sq.view(B, num_scales, cps, H, W)
-        per_scale = Ju_sq_view.sum(dim=(2, 3, 4)).mean(dim=0)  # [3]
+        per_scale = Ju_sq_view.sum(dim=(2, 3, 4)).mean(dim=0)  # [2]
         per_scale_accum += per_scale
 
     return per_scale_accum / K
 
 
 def chain_rule_factor_edm(sigma, sigma_data=0.5):
-    """Chain-rule factor: convert from x-space to logSNR-space.
-
-    SNR = sigma_data² / sigma²
-    factor = 1 / (SNR * (1 + SNR))
-    """
     snr = sigma_data ** 2 / (sigma ** 2 + 1e-20)
     return 1.0 / (snr * (1.0 + snr))
-
-
-def compute_3d_heatmap(net, x_torus, sigma_grid, device, K=4):
-    """Compute 3D error heatmap on G×G×G grid.
-
-    For each (σ_orig, σ_2x, σ_4x), compute per-scale Hutchinson error
-    with chain-rule correction.
-    """
+def compute_2d_heatmap(net, x_torus, sigma_grid, device, K=4):
+    """Compute 2D error heatmap on G×G grid."""
     G = len(sigma_grid)
-    error_orig = torch.zeros(G, G, G, device=device)
-    error_2x = torch.zeros(G, G, G, device=device)
-    error_4x = torch.zeros(G, G, G, device=device)
+    error_orig = torch.zeros(G, G, device=device)
+    error_2x = torch.zeros(G, G, device=device)
 
     B = x_torus.shape[0]
-    pbar = tqdm(total=G ** 3, desc=f"Computing {G}³ heatmap")
+    pbar = tqdm(total=G ** 2, desc=f"Computing {G}² heatmap")
 
     for i in range(G):
         s_orig = sigma_grid[i]
@@ -139,31 +113,26 @@ def compute_3d_heatmap(net, x_torus, sigma_grid, device, K=4):
         for j in range(G):
             s_2x = sigma_grid[j]
             gamma_2x = chain_rule_factor_edm(s_2x)
-            for ki in range(G):
-                s_4x = sigma_grid[ki]
-                gamma_4x = chain_rule_factor_edm(s_4x)
 
-                sv = torch.tensor([[s_orig, s_2x, s_4x]], device=device)
-                sv = sv.expand(B, 3)
-                z = add_noise_edm(x_torus, sv)
+            sv = torch.tensor([[s_orig, s_2x]], device=device)
+            sv = sv.expand(B, 2)
+            z = add_noise_edm_2d(x_torus, sv)
 
-                def f(z_in):
-                    return net(z_in, sv, force_fp32=True)
+            def f(z_in):
+                return net(z_in, sv, force_fp32=True)
 
-                with torch.no_grad():
-                    vhv = get_vHv_3scale_fd(f, z, K=K)
+            with torch.no_grad():
+                vhv = get_vHv_2scale_fd(f, z, K=K)
 
-                error_orig[i, j, ki] = vhv[0] * gamma_orig
-                error_2x[i, j, ki] = vhv[1] * gamma_2x
-                error_4x[i, j, ki] = vhv[2] * gamma_4x
-                pbar.update(1)
+            error_orig[i, j] = vhv[0] * gamma_orig
+            error_2x[i, j] = vhv[1] * gamma_2x
+            pbar.update(1)
 
     pbar.close()
-    return error_orig.cpu(), error_2x.cpu(), error_4x.cpu()
+    return error_orig.cpu(), error_2x.cpu()
 
 
 def build_sigma_grid(G, sigma_min=0.002, sigma_max=80.0, rho=7.0):
-    """Build sigma grid matching the rho schedule spacing."""
     idx = torch.arange(G, dtype=torch.float64)
     s = (sigma_max ** (1/rho) + idx/(G-1) * (sigma_min ** (1/rho) - sigma_max ** (1/rho))) ** rho
     return s.to(torch.float32)
@@ -171,10 +140,11 @@ def build_sigma_grid(G, sigma_min=0.002, sigma_max=80.0, rho=7.0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', default='/home/ylong030/slot/network-snapshot-052685.pkl')
+    parser.add_argument('--model_path', default=None,
+                        help='.pkl or .pth checkpoint for 2-scale model')
     parser.add_argument('--device', type=int, default=0)
-    parser.add_argument('--grid_size', type=int, default=10,
-                        help='Grid points per axis (10 = 1000 total)')
+    parser.add_argument('--grid_size', type=int, default=30,
+                        help='Grid points per axis (30 = 900 total)')
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Images for Hutchinson estimation')
     parser.add_argument('--K', type=int, default=4, help='Hutchinson samples')
@@ -188,15 +158,14 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load model
+    from generate_and_fid_2d import load_2scale_model
     print(f"Loading model...")
-    with dnnlib.util.open_url(args.model_path) as f:
-        data = pickle.load(f)
-    net = data['ema'].eval().to(device)
+    net = load_2scale_model(args.model_path, device)
 
     # Load data and build torus input
     print(f"Loading {args.batch_size} CIFAR images...")
     images = load_cifar_images(args.batch_size, seed=args.seed).to(device)
-    x_torus = build_multiscale_torus(images)
+    x_torus = build_multiscale_torus_2d(images)
     print(f"Torus input: {x_torus.shape}")
 
     # Build sigma grid
@@ -207,13 +176,13 @@ def main():
     log_snr = torch.log(snr_grid)
     print(f"\nSigma grid ({G} points): [{sigma_grid[0]:.2f}, ..., {sigma_grid[-1]:.4f}]")
     print(f"logSNR range: [{log_snr[0]:.2f}, {log_snr[-1]:.2f}]")
-    print(f"Total evaluations: {G**3}")
+    print(f"Total evaluations: {G**2}")
 
-    # Compute 3D heatmap
-    print(f"\nComputing 3D heatmap (K={args.K}, finite-diff)...")
-    error_orig, error_2x, error_4x = compute_3d_heatmap(
+    # Compute 2D heatmap
+    print(f"\nComputing 2D heatmap (K={args.K}, finite-diff)...")
+    error_orig, error_2x = compute_2d_heatmap(
         net, x_torus, sigma_grid, device, K=args.K)
-    error_total = error_orig + error_2x + error_4x
+    error_total = error_orig + error_2x
 
     # Save
     results = {
@@ -221,12 +190,11 @@ def main():
         'log_snr': log_snr.cpu(),
         'error_orig': error_orig,
         'error_2x': error_2x,
-        'error_4x': error_4x,
         'error_total': error_total,
         'grid_size': G,
         'args': vars(args),
     }
-    out_path = os.path.join(args.output_dir, f'heatmap_3d_{G}.pth')
+    out_path = os.path.join(args.output_dir, f'heatmap_2d_{G}.pth')
     torch.save(results, out_path)
     print(f"\nSaved: {out_path}")
 
@@ -234,29 +202,10 @@ def main():
     print("\n" + "=" * 60)
     print("Error ranges (with chain-rule factor)")
     print("=" * 60)
-    for name, e in [('orig', error_orig), ('2x', error_2x), ('4x', error_4x)]:
+    for name, e in [('orig', error_orig), ('2x', error_2x)]:
         print(f"  {name:5s}: [{e.min():.4e}, {e.max():.4e}], "
               f"log10 range: [{np.log10(e.min().item()+1e-20):.1f}, "
               f"{np.log10(e.max().item()+1e-20):.1f}]")
-
-    # Separability analysis
-    print("\n" + "=" * 60)
-    print("Separability analysis (CV across other axes)")
-    print("=" * 60)
-    eo, e2, e4 = error_orig.numpy(), error_2x.numpy(), error_4x.numpy()
-    for label, err, axis in [
-        ('error_orig (fix σ_orig)', eo, 0),
-        ('error_2x   (fix σ_2x)',   e2, 1),
-        ('error_4x   (fix σ_4x)',   e4, 2),
-    ]:
-        cvs = []
-        for idx in range(G):
-            slc = [slice(None)] * 3
-            slc[axis] = idx
-            vals = err[tuple(slc)].flatten()
-            if vals.mean() > 0:
-                cvs.append(vals.std() / vals.mean())
-        print(f"  {label}: mean CV = {np.mean(cvs):.4f}")
 
 
 if __name__ == '__main__':

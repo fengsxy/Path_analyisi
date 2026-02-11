@@ -218,6 +218,24 @@ To test generalization, we evaluate the same AFHQ-trained model on CelebA-HQ (hu
 
 **Key observations**: At early epochs (200–400), LIFT SR generalizes well to human faces — LPIPS is better than bicubic (0.03 vs 0.05), indicating the model learns generic super-resolution priors. However, beyond 400 epochs, the model overfits to animal face structure and OOD performance degrades sharply (LPIPS jumps to 0.13+). This contrasts with in-distribution AFHQ where performance improves monotonically through 2000 epochs. The sweet spot for OOD generalization is around 200–400 epochs of training.
 
+## SLOT / CIFAR-10 (explore_test_6)
+
+To test whether the "low guides high" pattern generalizes beyond LIFT/AFHQ, we run a separate experiment on a SLOT model (torus-based multi-scale EDM) trained on CIFAR-10 32×32 with 3 scales (orig, 2x, 4x). Instead of DP, we use a simpler approach: shift the 2x (coarse) scale's rho sigma schedule ahead by N steps relative to the original scale. `lead_N` means the coarse scale is N steps ahead in the same 18-step schedule.
+
+Lead scan (1000 images):
+
+| Lead Steps | 0 (sync) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|:----------:|:--------:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| FID | 70.2 | 68.0 | 66.7 | 65.0 | 63.2 | **61.7** | 62.1 | 63.2 | 66.4 | 73.1 | 81.9 |
+
+Final evaluation (10000 images):
+
+| Path | sync | lead_3 | lead_4 | lead_5 | lead_6 | lead_7 | lead_8 |
+|:----:|:----:|:------:|:------:|:------:|:------:|:------:|:------:|
+| FID | 43.22 | 38.17 | 35.89 | **34.21** | 35.04 | 36.23 | 39.80 |
+
+**lead_5 is optimal** — FID 34.21 vs sync 43.22, a 9-point improvement (21%). The curve is smooth and unimodal: too little lead helps modestly, too much hurts. This confirms that coarse-first denoising is a general property of multi-scale diffusion, not specific to LIFT's architecture or AFHQ dataset.
+
 ## Visualizations
 
 ### Optimal Path Visualization (EMA 400 epochs)
