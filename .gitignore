@@ -129,3 +129,9 @@ fid_*/
 wandb/
 tmp/
 temp/
+
+# explore_test results: images and large files (no need to commit)
+explore_test_*/results/*.png
+explore_test_*/results/*.npz
+explore_test_*/train_log.txt
+explore_test_*/test_gen.png

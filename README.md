@@ -49,6 +49,26 @@ A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with
 | 1800  | 256.19 | 48.80 | 187.47 | 92.91 |
 | 2000  | 259.67 | 41.67 | 193.21 | 63.60 |
 
+### Ablation: Training Noise Alignment (explore_test_5, EMA, single seed)
+
+Tests whether aligning training noise between scales helps SingleTimestepModel:
+- **same_t**: t_32 = t_64 (same timestep for both scales)
+- **dp_path**: t_32 follows learned DP-64 path from LIFT EMA 400ep
+- **heuristic**: t_32 = int(t_64 × 0.8)
+
+| Epoch | same_t Diag | same_t DP | dp_path Diag | dp_path DP | heuristic Diag | heuristic DP |
+|------:|------------:|----------:|-------------:|-----------:|---------------:|-------------:|
+| 200   | 259.66 | 305.41 | 236.41 | 233.45 | 273.22 | 290.48 |
+| 400   | 53.22 | 86.67 | 73.32 | 69.96 | 62.21 | 160.49 |
+| 600   | **40.62** | **59.94** | 41.37 | 39.60 | **53.30** | 179.77 |
+| 800   | 41.54 | 76.02 | **38.39** | 39.92 | 59.31 | 185.35 |
+| 1000  | 47.30 | 82.05 | 39.11 | **37.06** | 61.72 | 190.60 |
+| 1200  | 53.69 | 100.48 | 40.21 | 42.27 | 64.12 | 195.30 |
+| 1400  | 58.20 | 107.91 | 41.87 | 37.87 | 68.48 | 206.26 |
+| 1600  | 61.83 | 113.24 | 43.85 | 44.45 | 75.17 | 223.31 |
+| 1800  | 65.80 | 116.96 | 46.18 | 40.08 | 83.73 | 237.07 |
+| 2000  | 70.14 | 119.74 | 48.20 | 46.33 | 91.06 | 189.36 |
+
 ### Summary of Best FID
 
 | Model | Best FID | Epoch | Notes |
@@ -58,11 +78,15 @@ A dual-scale diffusion model that jointly denoises 64×64 and 32×32 images with
 | LIFT EMA DP-64 | 29.68 | 400 | Single seed |
 | LIFT EMA Diagonal | 31.04 | 400 | Single seed |
 | Baseline | 33.07±0.13 | 200 | 5-seed |
-| single_t DP | 34.42 | 600 | Ablation |
+| single_t DP | 34.42 | 600 | Ablation, no EMA |
 | LIFT DP-Total | 36.65±0.23 | 2000 | 5-seed |
+| dp_path DP (EMA) | 37.06 | 1000 | Training alignment |
+| dp_path Diag (EMA) | 38.39 | 800 | Training alignment |
+| same_t Diag (EMA) | 40.62 | 600 | Training alignment |
 | LIFT DP-64 | 48.39±0.26 | 800 | 5-seed |
 | LIFT Diagonal | 49.07±0.44 | 800 | 5-seed |
-| no_t DP | 61.68 | 600 | Ablation |
+| heuristic Diag (EMA) | 53.30 | 600 | Training alignment |
+| no_t DP | 61.68 | 600 | Ablation, no EMA |
 
 ## Key Findings
 
@@ -144,7 +168,23 @@ While cross-Jacobians are small in absolute terms, the trend is unambiguous: **t
 
 **Connection to γ_D chain-rule factor**: The alternative chain-rule factor γ_D = SNR/(4(1+SNR)²) produces an extreme version of this pattern — an L-shaped path that denoises 32×32 almost completely before starting on 64×64. However, this extreme strategy performs worse (FID 35.17 vs 28.91 with γ_B), suggesting that while "coarse first" is beneficial, pushing it too far is counterproductive. The optimal strategy is a moderate asymmetry where 32×32 leads by a few steps, not a complete sequential ordering.
 
-### 6. Super-Resolution (32→64)
+### 6. Training Noise Alignment (explore_test_5)
+
+Training SingleTimestepModel with different t_32 alignment strategies (all with EMA):
+
+| Model | Best Diagonal FID | Best DP FID | DP helps? |
+|-------|:-----------------:|:-----------:|:---------:|
+| dp_path | 38.39 @ 800ep | **37.06 @ 1000ep** | Yes |
+| same_t | **40.62 @ 600ep** | 59.94 @ 600ep | No (hurts) |
+| heuristic | 53.30 @ 600ep | 160.49 @ 400ep | No (catastrophic) |
+
+Key insights:
+- **DP path only helps when training matches generation**: dp_path (trained with DP-aligned noise) is the only model where DP improves FID. For same_t and heuristic, DP makes things worse.
+- **Heuristic t_32=0.8×t_64 is harmful**: Creates a training/generation mismatch that DP amplifies (160+ FID).
+- **None beat dual-output LIFT** (28.91 DP-Total @ 400ep): Single-output architecture is fundamentally limited — predicting only noise_64 loses the benefit of jointly optimizing both scales.
+- **All models overfit after 600-1000ep**: EMA delays but doesn't prevent overfitting.
+
+### 7. Super-Resolution (32→64)
 
 LIFT naturally supports conditional super-resolution: by setting t_32=0 (clean 32×32 input) and denoising only x_64 from pure noise, the model acts as a 32→64 SR network. No retraining is needed — the model was trained with all (t_64, t_32) pairs including t_32=0.
 

@@ -270,6 +270,7 @@ def chain_rule_factor(snr):
 - `explore_test/eval_dp.py`: Heatmap + DP path FID evaluation for explore_test models
 - `explore_test/eval_all.sh`: Parallel launcher (GPU 1: single_t, GPU 3: no_t)
 - `explore_test_2/`: EMA training scripts
+- `explore_test_5/`: SingleTimestepModel + EMA + 3 training regimes (same_t, dp_path, heuristic)
 
 ## Experiment Settings
 
@@ -279,6 +280,29 @@ def chain_rule_factor(snr):
 - **Checkpoints**: 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000 epochs
 - **FID evaluation**: 15803 images (full AFHQ training set for stable FID)
 - **Seed**: 42 (default)
+
+### Best FID Results Across All Experiments
+
+| Experiment | Best FID | Epoch | Method |
+|-----------|----------|-------|--------|
+| Baseline EMA | 27.90 | 400 | Diagonal |
+| LIFT EMA DP-Total | 28.91 | 400 | DP-Total (λ-space) |
+| LIFT EMA DP-64 | 29.68 | 400 | DP-64 (λ-space) |
+| Baseline (no EMA, 5-seed) | 33.07±0.13 | 200 | Diagonal |
+| explore_test single_t (no EMA) | 34.42 | 600 | DP |
+| LIFT (no EMA, 5-seed) | 36.65±0.23 | 2000 | DP-Total |
+| explore_test_5 dp_path (EMA) | 37.06 | 1000 | DP |
+| explore_test_5 same_t (EMA) | 40.62 | 600 | Diagonal |
+| explore_test_5 heuristic (EMA) | 53.30 | 600 | Diagonal |
+| explore_test no_t (no EMA) | 61.68 | 600 | DP |
+
+### Key Experimental Insights
+
+1. **EMA is critical** — EMA (decay=0.9999) improves FID by ~5-7 points (27.90 vs 33.07 for baseline)
+2. **Dual-output > single-output** — LIFT (predicts both noise_64 and noise_32) consistently beats SingleTimestepModel (predicts only noise_64), even with EMA and training alignment tricks
+3. **DP path helps when model is trained for it** — DP improves LIFT and dp_path-trained models, but hurts same_t and heuristic models
+4. **Models overfit after 400-600ep with EMA** — best EMA results are at 400ep (LIFT, baseline) or 600-1000ep (explore_test_5); longer training degrades FID
+5. **"Low guides high" pattern** — in all DP-Total paths, t_32 decreases faster than t_64 (17/19 steps), suggesting the low-res scale should denoise ahead of high-res
 
 ### IMPORTANT: Experiment Consistency Rule
 
@@ -387,6 +411,53 @@ python eval_dp.py --model_type no_t --epochs 200 400 --device 3
 - Real features cached at parent `results/real_features.npz` (shared)
 - Checkpoints: `explore_test/checkpoints/{single_t,no_t}_{epoch}ep.pth`
 - Results: `explore_test/results/`
+
+## explore_test_5: Training Noise Alignment Experiments
+
+Tests whether aligning training noise between scales improves SingleTimestepModel (+ EMA, decay=0.9999).
+
+### Three Training Regimes
+
+| Name | Training t_32 | Description |
+|------|--------------|-------------|
+| `same_t` | t_32 = t_64 | Same timestep for both scales |
+| `dp_path` | t_32 = interp(DP-64 path, t_64) | t_32 follows learned optimal path from LIFT EMA 400ep |
+| `heuristic` | t_32 = int(t_64 × 0.8) | Fixed ratio: 32 denoises 20% faster |
+
+All use SingleTimestepModel (from `explore_test/model_single_t.py`) — model receives only t_64.
+
+### Commands
+
+```bash
+cd explore_test_5
+
+# Train all 3 in parallel (GPUs 1/2/3)
+./train_2000.sh
+
+# Evaluate all (diagonal + DP)
+./eval_all.sh
+./eval_all.sh 200 400 600    # Specific epochs
+
+# Individual
+python train.py --model {same_t,dp_path,heuristic} --epochs 2000 --device 0
+python eval_fid_batch.py --model_type same_t --epochs 200 400 --device 0
+python eval_dp.py --model_type dp_path --epochs 200 400 --device 0
+```
+
+### Results Summary (Best FID per model)
+
+| Model | Best Diagonal FID | Best DP FID |
+|-------|-------------------|-------------|
+| dp_path | 38.39 @ 800ep | **37.06 @ 1000ep** |
+| same_t | 40.62 @ 600ep | 59.94 @ 600ep |
+| heuristic | 53.30 @ 600ep | 160.49 @ 400ep |
+
+### Key Findings
+
+1. **dp_path is the only model where DP improves over diagonal** — training with DP-aligned noise creates a model that benefits from DP generation
+2. **All models overfit after 600-1000ep** — FID steadily worsens, EMA doesn't prevent this
+3. **Heuristic 0.8× ratio is harmful for DP** — creates training/generation mismatch, DP FID 4× worse than diagonal
+4. **None beat main LIFT EMA** (28.91 DP-Total @ 400ep) — single-output architecture is fundamentally limited vs dual-output
 
 ## Patterns for Writing New Eval Scripts
 
